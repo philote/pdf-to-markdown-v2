@@ -46,7 +46,8 @@ class PDFToMarkdownConverter:
         self.jobs_dir.mkdir(exist_ok=True)
         
     def convert(self, pdf_path: str, page_ranges: Optional[str] = None,
-                skip_optimization: bool = False, keep_images: bool = False) -> Dict[str, Any]:
+                skip_optimization: bool = False, keep_images: bool = False,
+                enhanced_formatting: bool = False) -> Dict[str, Any]:
         """
         Convert PDF to Markdown with progress tracking
         
@@ -55,6 +56,7 @@ class PDFToMarkdownConverter:
             page_ranges: Optional page ranges to process
             skip_optimization: Skip PDF optimization step
             keep_images: Keep images during optimization
+            enhanced_formatting: Enable enhanced formatting for TTRPG documents
             
         Returns:
             Dict with conversion results
@@ -127,7 +129,7 @@ class PDFToMarkdownConverter:
                 ocr_result = self.ocr.process_with_formatting_prompt(
                     str(optimized_path),
                     page_ranges=page_ranges,
-                    aggressive_formatting=True
+                    aggressive_formatting=enhanced_formatting
                 )
                 
                 if ocr_result['status'] != 'success':
@@ -299,6 +301,7 @@ Examples:
   %(prog)s input/rulebook.pdf
   %(prog)s input/rulebook.pdf --pages 1-50,75-100
   %(prog)s input/rulebook.pdf --no-optimize
+  %(prog)s input/rulebook.pdf --enhanced-formatting
   %(prog)s --list-jobs
   %(prog)s --check-job job_20240713_103045_rulebook
         """
@@ -311,6 +314,7 @@ Examples:
     parser.add_argument('--pages', help='Page ranges to process (e.g., "1-10,15-20")')
     parser.add_argument('--no-optimize', action='store_true', help='Skip PDF optimization')
     parser.add_argument('--keep-images', action='store_true', help='Keep images during optimization')
+    parser.add_argument('--enhanced-formatting', action='store_true', help='Enable enhanced formatting preservation for TTRPG documents')
     
     # Job management
     parser.add_argument('--list-jobs', action='store_true', help='List recent processing jobs')
@@ -339,7 +343,8 @@ Examples:
                 args.pdf_file,
                 page_ranges=args.pages,
                 skip_optimization=args.no_optimize,
-                keep_images=args.keep_images
+                keep_images=args.keep_images,
+                enhanced_formatting=args.enhanced_formatting
             )
             
             if result['status'] == 'error':

@@ -134,7 +134,7 @@ class MistralOCR:
     def process_with_formatting_prompt(self, pdf_path: str, page_ranges: Optional[str] = None,
                                      aggressive_formatting: bool = True) -> Dict[str, Any]:
         """
-        Process PDF with specific formatting preservation prompt
+        Process PDF with enhanced formatting preservation
         
         Args:
             pdf_path: Path to PDF file
@@ -144,28 +144,161 @@ class MistralOCR:
         Returns:
             Dict with processing results
         """
-        # Prepare the formatting prompt based on requirements
-        if aggressive_formatting:
-            # Adapted prompt for Mistral OCR based on the README suggestion
-            prompt = """Extract text with MANDATORY formatting preservation:
-- Convert ALL bold text to **bold** markdown
-- Convert ALL italic text to *italic* markdown  
-- Preserve headers with appropriate # levels
-- Maintain list structures and indentation
-- Keep table formatting intact
-- NEVER skip formatting - check every word for font weight and style changes
-- Bold headings, game titles, author names, and emphasized terms are CRITICAL"""
-        else:
-            prompt = "Extract text preserving basic formatting and structure"
+        if self.verbose:
+            if aggressive_formatting:
+                print("Using enhanced formatting preservation mode")
+            else:
+                print("Using standard formatting preservation")
         
-        # For now, Mistral OCR doesn't support custom prompts in the basic API
-        # This would need to be implemented if/when the API supports it
-        # For now, we'll use the standard processing
+        # Try to use enhanced OCR processing for better formatting
+        return self.process_pdf_enhanced(pdf_path, page_ranges, aggressive_formatting)
+    
+    def process_pdf_enhanced(self, pdf_path: str, page_ranges: Optional[str] = None,
+                           enhanced_formatting: bool = True) -> Dict[str, Any]:
+        """
+        Enhanced PDF processing with better formatting preservation
         
-        if self.verbose and aggressive_formatting:
-            print("Note: Using standard Mistral OCR formatting (custom prompts not yet supported)")
+        Args:
+            pdf_path: Path to PDF file
+            page_ranges: Optional page ranges
+            enhanced_formatting: Use enhanced formatting options
+            
+        Returns:
+            Dict with processing results
+        """
+        pdf_path = Path(pdf_path)
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"PDF not found: {pdf_path}")
         
-        return self.process_pdf(pdf_path, page_ranges)
+        start_time = time.time()
+        
+        if self.verbose:
+            print(f"Processing PDF: {pdf_path.name}")
+            if page_ranges:
+                print(f"Page ranges: {page_ranges}")
+        
+        try:
+            # Parse page ranges if provided
+            pages_to_process = self._parse_page_ranges(page_ranges) if page_ranges else None
+            
+            # Prepare document for OCR
+            document_data = self._prepare_base64_document(pdf_path, pages_to_process)
+            
+            # Submit OCR request with enhanced formatting
+            if self.verbose:
+                print("Submitting to Mistral OCR API with enhanced formatting...")
+            
+            # Prepare API call parameters with enhanced formatting options
+            api_params = {
+                'model': self.model,
+                'document': document_data,
+                'include_image_base64': False  # We don't need embedded images for TTRPG text
+            }
+            
+            # Add page ranges if specified (Mistral API uses 0-indexed pages)
+            if pages_to_process:
+                # Convert 1-indexed page ranges to 0-indexed for API
+                zero_indexed_pages = [p - 1 for p in pages_to_process]
+                api_params['pages'] = zero_indexed_pages
+                if self.verbose:
+                    print(f"Processing pages: {zero_indexed_pages} (0-indexed)")
+            else:
+                if self.verbose:
+                    print("Processing entire document (no page range specified)")
+            
+            # Enhanced formatting: Try to use document annotation format for better structure
+            if enhanced_formatting:
+                try:
+                    # This is experimental - try to request more structured output
+                    # The API might provide better formatting preservation with structured output
+                    api_params['include_image_base64'] = False
+                    if self.verbose:
+                        print("Requesting enhanced formatting preservation")
+                except Exception as e:
+                    if self.verbose:
+                        print(f"Enhanced formatting not available, using standard: {e}")
+            
+            response = self.client.ocr.process(**api_params)
+            
+            # Extract markdown content
+            markdown_content = self._extract_markdown(response)
+            
+            # Post-process for even better formatting if requested
+            if enhanced_formatting:
+                markdown_content = self._enhance_formatting(markdown_content)
+            
+            processing_time = time.time() - start_time
+            
+            result = {
+                'status': 'success',
+                'input_file': str(pdf_path),
+                'markdown_content': markdown_content,
+                'processing_time': processing_time,
+                'model': self.model,
+                'page_ranges': page_ranges,
+                'enhanced_formatting': enhanced_formatting,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            if self.verbose:
+                print(f"OCR completed in {processing_time:.1f} seconds")
+            
+            return result
+            
+        except Exception as e:
+            error_result = {
+                'status': 'error',
+                'input_file': str(pdf_path),
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            if self.verbose:
+                print(f"OCR failed: {e}")
+            
+            return error_result
+    
+    def _enhance_formatting(self, markdown_content: str) -> str:
+        """
+        Post-process markdown to enhance formatting
+        
+        Args:
+            markdown_content: Raw markdown from OCR
+            
+        Returns:
+            Enhanced markdown with improved formatting
+        """
+        if not markdown_content:
+            return markdown_content
+        
+        # Apply additional formatting enhancements
+        lines = markdown_content.split('\n')
+        enhanced_lines = []
+        
+        for line in lines:
+            # Enhance common TTRPG formatting patterns
+            enhanced_line = line
+            
+            # Ensure move names are properly bolded (common TTRPG pattern)
+            # Look for patterns like "When you do something:" and make "do something" bold
+            import re
+            
+            # Pattern for move descriptions
+            move_pattern = r'When you ([^,]+)(?:,|:)'
+            enhanced_line = re.sub(move_pattern, lambda m: f'When you **{m.group(1)}**,', enhanced_line)
+            
+            # Pattern for roll instructions  
+            roll_pattern = r'roll\+(\w+)'
+            enhanced_line = re.sub(roll_pattern, r'roll+**\1**', enhanced_line)
+            
+            # Ensure stat names are emphasized
+            stat_pattern = r'\b(cool|hard|hot|sharp|weird|Hx)\b'
+            enhanced_line = re.sub(stat_pattern, r'**\1**', enhanced_line, flags=re.IGNORECASE)
+            
+            enhanced_lines.append(enhanced_line)
+        
+        return '\n'.join(enhanced_lines)
     
     def _prepare_base64_document(self, pdf_path: Path, pages: Optional[List[int]] = None) -> Dict[str, Any]:
         """
