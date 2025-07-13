@@ -723,15 +723,34 @@ def main():
             console.print(f"[blue]Using custom prompt from: {args.custom_prompt}[/blue]")
             result = chat_ocr.process_with_custom_prompt(args.pdf_path, custom_prompt, args.pages)
             
-            # Save results
-            output_file = output_dir / f"{pdf_name}_custom_{timestamp}.md"
-            metadata_file = output_dir / f"{pdf_name}_custom_{timestamp}_metadata.json"
+            # Save results with job ID
+            job_id = result.get('job_id', f'job_{timestamp}')
+            output_file = output_dir / f"{pdf_name}_custom_{job_id}.md"
+            metadata_file = output_dir / f"{pdf_name}_custom_{job_id}_metadata.json"
             
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(result['markdown_content'])
             
+            # Create comprehensive metadata
+            comprehensive_metadata = {
+                'source_pdf': Path(args.pdf_path).name,
+                'output_markdown': output_file.name,
+                'processing_date': datetime.now().isoformat(),
+                'job_id': job_id,
+                'pages_processed': args.pages or "all",
+                'approach': 'custom',
+                'custom_prompt_file': args.custom_prompt,
+                'processing_time': {
+                    'total': result.get('processing_time', 0)
+                },
+                'mistral_model': result.get('model', 'unknown'),
+                'formatting_prompt_length': result.get('formatting_prompt_length', 0),
+                'markdown_length': len(result.get('markdown_content', '')),
+                'raw_result': result
+            }
+            
             with open(metadata_file, 'w', encoding='utf-8') as f:
-                json.dump(result, f, indent=2, default=str)
+                json.dump(comprehensive_metadata, f, indent=2, default=str)
             
             console.print(f"[green]Results saved to: {output_file}[/green]")
             
@@ -740,17 +759,35 @@ def main():
             console.print("[blue]Testing all formatting approaches...[/blue]")
             results = chat_ocr.test_formatting_approaches(args.pdf_path, args.pages)
             
-            # Save results for each approach
+            # Save results for each approach with job IDs
             for approach_name, result in results.items():
-                output_file = output_dir / f"{pdf_name}_{approach_name}_{timestamp}.md"
-                metadata_file = output_dir / f"{pdf_name}_{approach_name}_{timestamp}_metadata.json"
+                job_id = result.get('job_id', f'job_{timestamp}_{approach_name}')
+                output_file = output_dir / f"{pdf_name}_{approach_name}_{job_id}.md"
+                metadata_file = output_dir / f"{pdf_name}_{approach_name}_{job_id}_metadata.json"
                 
                 if result['status'] == 'success':
                     with open(output_file, 'w', encoding='utf-8') as f:
                         f.write(result['markdown_content'])
                 
+                # Create comprehensive metadata
+                comprehensive_metadata = {
+                    'source_pdf': Path(args.pdf_path).name,
+                    'output_markdown': output_file.name,
+                    'processing_date': datetime.now().isoformat(),
+                    'job_id': job_id,
+                    'pages_processed': args.pages or "all",
+                    'approach': approach_name,
+                    'processing_time': {
+                        'total': result.get('processing_time', 0)
+                    },
+                    'mistral_model': result.get('model', 'unknown'),
+                    'formatting_prompt_length': result.get('formatting_prompt_length', 0),
+                    'markdown_length': len(result.get('markdown_content', '')),
+                    'raw_result': result
+                }
+                
                 with open(metadata_file, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, indent=2, default=str)
+                    json.dump(comprehensive_metadata, f, indent=2, default=str)
                 
                 console.print(f"[green]{approach_name} results saved to: {output_file}[/green]")
             
@@ -782,16 +819,34 @@ def main():
                 prompt = chat_ocr._get_laser_focused_prompt()
                 result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
             
-            # Save results
-            output_file = output_dir / f"{pdf_name}_{args.approach}_{timestamp}.md"
-            metadata_file = output_dir / f"{pdf_name}_{args.approach}_{timestamp}_metadata.json"
+            # Save results with job ID
+            job_id = result.get('job_id', f'job_{timestamp}')
+            output_file = output_dir / f"{pdf_name}_{args.approach}_{job_id}.md"
+            metadata_file = output_dir / f"{pdf_name}_{args.approach}_{job_id}_metadata.json"
             
             if result['status'] == 'success':
                 with open(output_file, 'w', encoding='utf-8') as f:
                     f.write(result['markdown_content'])
             
+            # Create comprehensive metadata like pdf2md.py
+            comprehensive_metadata = {
+                'source_pdf': Path(args.pdf_path).name,
+                'output_markdown': output_file.name,
+                'processing_date': datetime.now().isoformat(),
+                'job_id': job_id,
+                'pages_processed': args.pages or "all",
+                'approach': args.approach,
+                'processing_time': {
+                    'total': result.get('processing_time', 0)
+                },
+                'mistral_model': result.get('model', 'unknown'),
+                'formatting_prompt_length': result.get('formatting_prompt_length', 0),
+                'markdown_length': len(result.get('markdown_content', '')),
+                'raw_result': result  # Include original result for completeness
+            }
+            
             with open(metadata_file, 'w', encoding='utf-8') as f:
-                json.dump(result, f, indent=2, default=str)
+                json.dump(comprehensive_metadata, f, indent=2, default=str)
             
             console.print(f"[green]Results saved to: {output_file}[/green]")
         
