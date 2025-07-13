@@ -53,6 +53,9 @@ pip-delete-this-directory.txt
 
 # Project-specific
 .claude/
+input/*
+output/*
+.jobs/*.json
 
 # IDE
 .vscode/

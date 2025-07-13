@@ -1,0 +1,15 @@
+# PDF Processing
+PyMuPDF>=1.23.0
+PyPDF2>=3.0.0
+
+# Mistral AI OCR
+mistralai>=0.0.12
+
+# Environment & Configuration
+python-dotenv>=1.0.0
+
+# CLI & Progress Display
+rich>=13.0.0
+
+# Optional: For better error messages
+typing-extensions>=4.0.0
