@@ -174,8 +174,10 @@ The project uses a `.env` file (likely for Mistral API credentials). Create this
 - Integration testing via main CLI tool
 
 ### Usage Examples
+
+#### Standard Approach
 ```bash
-# Test with sample file
+# Basic conversion
 python pdf2md.py input/AW-Basic_Refbook.pdf --pages 1-5
 
 # Check optimization decisions
@@ -183,4 +185,23 @@ python pdf_optimizer.py input/AW-Basic_Refbook.pdf
 
 # Test OCR directly
 python mistral_ocr.py input/AW-Basic_Refbook.pdf
+```
+
+#### Advanced Chat Approach (Recommended)
+```bash
+# Best formatting preservation
+python pdf2md_chat.py input/AW-Basic_Refbook.pdf --approach laser_focused
+
+# Test specific pages for cost optimization
+python pdf2md_chat.py input/AW-Basic_Refbook.pdf --pages 5-8 --approach laser_focused
+
+# Compare all approaches (for research/testing)
+python pdf2md_chat.py input/AW-Basic_Refbook.pdf --test-all --pages 5-8
+
+# Custom formatting prompts
+python pdf2md_chat.py input/AW-Basic_Refbook.pdf --custom-prompt my_custom_prompt.txt
+
+# Job management
+python pdf2md_chat.py --list-jobs
+python pdf2md_chat.py --check-job job_20250713_162124_AW-Basic_Refbook
 ```

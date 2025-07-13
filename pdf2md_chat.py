@@ -48,6 +48,8 @@ class MistralChatOCR:
         self.client = Mistral(api_key=self.api_key)
         self.model = model
         self.verbose = verbose
+        self.jobs_dir = Path(".jobs")
+        self.jobs_dir.mkdir(exist_ok=True)
         
         if self.verbose:
             console.print(f"[green]Initialized Mistral Chat OCR with model: {self.model}[/green]")
@@ -69,7 +71,20 @@ class MistralChatOCR:
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
         
+        # Initialize job tracking
+        job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{pdf_path.stem}"
+        job_data = {
+            'id': job_id,
+            'input_file': str(pdf_path),
+            'status': 'started',
+            'start_time': datetime.now().isoformat(),
+            'page_ranges': page_ranges,
+            'formatting_prompt_type': 'custom' if formatting_prompt else 'default'
+        }
+        self._save_job(job_id, job_data)
+        
         # Extract specific pages if page_ranges provided
+        original_pdf_path = pdf_path
         if page_ranges:
             pdf_path = self._extract_pages(pdf_path, page_ranges)
             temp_file = True
@@ -148,14 +163,23 @@ class MistralChatOCR:
             
             result = {
                 'status': 'success',
-                'input_file': str(pdf_path),
+                'input_file': str(original_pdf_path),
                 'markdown_content': markdown_content,
                 'processing_time': processing_time,
                 'model': self.model,
                 'formatting_prompt_length': len(formatting_prompt),
                 'page_ranges': page_ranges,
+                'job_id': job_id,
                 'timestamp': datetime.now().isoformat()
             }
+            
+            # Update job status to completed
+            job_data['status'] = 'completed'
+            job_data['end_time'] = datetime.now().isoformat()
+            job_data['processing_time'] = processing_time
+            job_data['markdown_length'] = len(markdown_content)
+            job_data['model'] = self.model
+            self._save_job(job_id, job_data)
             
             # Clean up temporary file if created
             if temp_file and pdf_path.exists():
@@ -168,16 +192,24 @@ class MistralChatOCR:
             return result
             
         except Exception as e:
+            # Update job with error
+            job_data['status'] = 'failed'
+            job_data['error'] = str(e)
+            job_data['error_type'] = type(e).__name__
+            job_data['end_time'] = datetime.now().isoformat()
+            self._save_job(job_id, job_data)
+            
             # Clean up temporary file if created
             if 'temp_file' in locals() and temp_file and pdf_path.exists():
                 pdf_path.unlink()
                 
             error_result = {
                 'status': 'error',
-                'input_file': str(pdf_path),
+                'input_file': str(original_pdf_path if 'original_pdf_path' in locals() else pdf_path),
                 'error': str(e),
                 'error_type': type(e).__name__,
                 'page_ranges': page_ranges,
+                'job_id': job_id,
                 'timestamp': datetime.now().isoformat()
             }
             
@@ -540,6 +572,79 @@ DETECTION PRIORITY:
 
 Scan every single word for font weight AND slant changes. Convert this PDF to markdown preserving ALL formatting.
 """
+    
+    def list_jobs(self, limit: int = 10):
+        """List recent processing jobs"""
+        jobs = []
+        for job_file in sorted(self.jobs_dir.glob("*.json"), reverse=True)[:limit]:
+            with open(job_file, 'r') as f:
+                jobs.append(json.load(f))
+        
+        if not jobs:
+            console.print("[yellow]No jobs found[/yellow]")
+            return
+        
+        from rich.table import Table
+        table = Table(title="Recent Processing Jobs")
+        table.add_column("Job ID", style="cyan")
+        table.add_column("Input File", style="white")
+        table.add_column("Status", style="white")
+        table.add_column("Start Time", style="white")
+        
+        for job in jobs:
+            status_style = {
+                'completed': 'green',
+                'failed': 'red',
+                'started': 'yellow'
+            }.get(job['status'], 'white')
+            
+            table.add_row(
+                job['id'],
+                Path(job['input_file']).name,
+                f"[{status_style}]{job['status']}[/{status_style}]",
+                job['start_time'][:19].replace('T', ' ')
+            )
+        
+        console.print(table)
+    
+    def check_job(self, job_id: str):
+        """Check specific job status"""
+        job_file = self.jobs_dir / f"{job_id}.json"
+        
+        if not job_file.exists():
+            console.print(f"[red]Job not found: {job_id}[/red]")
+            return
+        
+        with open(job_file, 'r') as f:
+            job = json.load(f)
+        
+        from rich.panel import Panel
+        panel = Panel.fit(
+            f"""[bold]Job ID:[/bold] {job['id']}
+[bold]Status:[/bold] {job['status']}
+[bold]Input:[/bold] {job['input_file']}
+[bold]Started:[/bold] {job['start_time']}
+[bold]Pages:[/bold] {job.get('page_ranges', 'all')}
+[bold]Prompt Type:[/bold] {job.get('formatting_prompt_type', 'unknown')}""",
+            title=f"Job Details - {job_id}",
+            border_style="cyan"
+        )
+        
+        console.print(panel)
+        
+        if job['status'] == 'completed':
+            console.print("\n[green]Processing Results:[/green]")
+            console.print(f"  Processing time: {job.get('processing_time', 'N/A'):.1f}s")
+            console.print(f"  Markdown length: {job.get('markdown_length', 'N/A')} characters")
+            console.print(f"  Model used: {job.get('model', 'N/A')}")
+        elif job['status'] == 'failed' and 'error' in job:
+            console.print(f"\n[red]Error: {job['error']}[/red]")
+    
+    def _save_job(self, job_id: str, job_data: Dict[str, Any]):
+        """Save job data to file"""
+        job_file = self.jobs_dir / f"{job_id}.json"
+        with open(job_file, 'w') as f:
+            json.dump(job_data, f, indent=2, default=str)
 
 
 def main():
@@ -547,13 +652,17 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Test Mistral Chat OCR for formatting preservation")
-    parser.add_argument("pdf_path", help="Path to PDF file")
+    parser.add_argument("pdf_path", nargs="?", help="Path to PDF file")
     parser.add_argument("--approach", choices=['default', 'aggressive', 'minimal', 'llamaparse', 'italic_focused', 'style_hunter', 'ultra_precise', 'laser_focused', 'all'], 
                        default='default', help="Formatting approach to test")
     parser.add_argument("--output-dir", default="output", help="Output directory")
     parser.add_argument("--model", default="mistral-small-latest", help="Mistral model to use")
     parser.add_argument("--custom-prompt", help="Use a custom prompt from file")
     parser.add_argument("--pages", help="Page ranges to process (e.g., '1-3,5,7-9')")
+    
+    # Job management
+    parser.add_argument("--list-jobs", action="store_true", help="List recent processing jobs")
+    parser.add_argument("--check-job", help="Check specific job status")
     
     args = parser.parse_args()
     
@@ -565,6 +674,19 @@ def main():
         # Initialize Mistral Chat OCR
         chat_ocr = MistralChatOCR(model=args.model, verbose=True)
         
+        # Handle job management commands first
+        if args.list_jobs:
+            chat_ocr.list_jobs()
+            return
+        elif args.check_job:
+            chat_ocr.check_job(args.check_job)
+            return
+        
+        # Check if PDF file was provided for processing
+        if not args.pdf_path:
+            parser.print_help()
+            return
+            
         # Generate timestamp for output files
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pdf_name = Path(args.pdf_path).stem
