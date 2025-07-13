@@ -67,15 +67,15 @@ class PDFToMarkdownConverter:
         if self.ocr is None:
             self.ocr = MistralOCR(verbose=False)
         
-        # Generate output paths
+        # Initialize job tracking first to get job ID
+        job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{pdf_path.stem}"
+        
+        # Generate output paths with job ID
         output_dir = Path("output")
         output_dir.mkdir(exist_ok=True)
         
-        markdown_path = output_dir / f"{pdf_path.stem}.md"
-        metadata_path = output_dir / f"{pdf_path.stem}_metadata.json"
-        
-        # Initialize job tracking
-        job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{pdf_path.stem}"
+        markdown_path = output_dir / f"{pdf_path.stem}_{job_id}.md"
+        metadata_path = output_dir / f"{pdf_path.stem}_{job_id}_metadata.json"
         job_data = {
             'id': job_id,
             'input_file': str(pdf_path),

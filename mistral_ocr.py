@@ -77,11 +77,25 @@ class MistralOCR:
             if self.verbose:
                 print("Submitting to Mistral OCR API...")
             
-            response = self.client.ocr.process(
-                model=self.model,
-                document=document_data,
-                include_image_base64=False  # We don't need embedded images for TTRPG text
-            )
+            # Prepare API call parameters
+            api_params = {
+                'model': self.model,
+                'document': document_data,
+                'include_image_base64': False  # We don't need embedded images for TTRPG text
+            }
+            
+            # Add page ranges if specified (Mistral API uses 0-indexed pages)
+            if pages_to_process:
+                # Convert 1-indexed page ranges to 0-indexed for API
+                zero_indexed_pages = [p - 1 for p in pages_to_process]
+                api_params['pages'] = zero_indexed_pages
+                if self.verbose:
+                    print(f"Processing pages: {zero_indexed_pages} (0-indexed)")
+            else:
+                if self.verbose:
+                    print("Processing entire document (no page range specified)")
+            
+            response = self.client.ocr.process(**api_params)
             
             # Extract markdown content
             markdown_content = self._extract_markdown(response)
