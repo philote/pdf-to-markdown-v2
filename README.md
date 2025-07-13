@@ -70,6 +70,7 @@ python pdf2md.py --check-job <job_id>
 - `--pages`: Specify page ranges (e.g., "1-10,15-20")
 - `--no-optimize`: Skip PDF optimization step
 - `--keep-images`: Keep images during optimization
+- `--enhanced-formatting`: Enable enhanced formatting preservation for TTRPG documents
 - `--verbose`: Enable detailed output
 
 ### Examples
@@ -86,6 +87,9 @@ python pdf2md.py input/small_doc.pdf --no-optimize
 
 # Keep images (useful for illustrated content)
 python pdf2md.py input/bestiary.pdf --keep-images
+
+# Enhanced formatting for TTRPG documents
+python pdf2md.py input/rulebook.pdf --enhanced-formatting
 
 # Check what jobs have been run
 python pdf2md.py --list-jobs
@@ -143,6 +147,13 @@ Clean, semantic markdown with preserved formatting:
 - Bold (`**text**`) and italic (`*text*`)
 - Lists and tables
 - Proper paragraph structure
+
+#### Enhanced Formatting for TTRPG Documents
+When using `--enhanced-formatting`, additional processing ensures:
+- Game stats (cool, hard, hot, sharp, weird) are properly emphasized
+- Move descriptions follow consistent formatting patterns
+- Roll instructions are clearly highlighted
+- TTRPG-specific terminology is properly formatted
 
 ### Metadata JSON
 Comprehensive processing information:
