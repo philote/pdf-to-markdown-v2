@@ -723,73 +723,116 @@ def main():
             console.print(f"[blue]Using custom prompt from: {args.custom_prompt}[/blue]")
             result = chat_ocr.process_with_custom_prompt(args.pdf_path, custom_prompt, args.pages)
             
-            # Save results with job ID
+            # Handle results with comprehensive error handling
             job_id = result.get('job_id', f'job_{timestamp}')
             output_file = output_dir / f"{pdf_name}_custom_{job_id}.md"
             metadata_file = output_dir / f"{pdf_name}_custom_{job_id}_metadata.json"
             
-            with open(output_file, 'w', encoding='utf-8') as f:
-                f.write(result['markdown_content'])
-            
-            # Create comprehensive metadata
+            # Create comprehensive metadata for both success and failure
             comprehensive_metadata = {
                 'source_pdf': Path(args.pdf_path).name,
-                'output_markdown': output_file.name,
+                'output_markdown': output_file.name if result['status'] == 'success' else None,
                 'processing_date': datetime.now().isoformat(),
                 'job_id': job_id,
                 'pages_processed': args.pages or "all",
                 'approach': 'custom',
                 'custom_prompt_file': args.custom_prompt,
+                'status': result['status'],
                 'processing_time': {
                     'total': result.get('processing_time', 0)
                 },
                 'mistral_model': result.get('model', 'unknown'),
                 'formatting_prompt_length': result.get('formatting_prompt_length', 0),
-                'markdown_length': len(result.get('markdown_content', '')),
+                'markdown_length': len(result.get('markdown_content', '')) if result['status'] == 'success' else 0,
                 'raw_result': result
             }
             
+            # Handle success case
+            if result['status'] == 'success':
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    f.write(result['markdown_content'])
+                console.print(f"[green]Results saved to: {output_file}[/green]")
+            
+            # Handle error case with comprehensive error metadata
+            else:
+                comprehensive_metadata.update({
+                    'error': result.get('error', 'Unknown error'),
+                    'error_type': result.get('error_type', 'UnknownError'),
+                    'failed_at': datetime.now().isoformat()
+                })
+                console.print(f"[red]Processing failed: {result.get('error', 'Unknown error')}[/red]")
+                console.print(f"[yellow]Error metadata saved to: {metadata_file}[/yellow]")
+            
+            # Always save metadata (success or failure)
             with open(metadata_file, 'w', encoding='utf-8') as f:
                 json.dump(comprehensive_metadata, f, indent=2, default=str)
             
-            console.print(f"[green]Results saved to: {output_file}[/green]")
+            # Exit with error code if processing failed
+            if result['status'] != 'success':
+                sys.exit(1)
             
         elif args.approach == 'all':
             # Test all approaches
             console.print("[blue]Testing all formatting approaches...[/blue]")
             results = chat_ocr.test_formatting_approaches(args.pdf_path, args.pages)
             
-            # Save results for each approach with job IDs
+            # Save results for each approach with comprehensive error handling
+            failed_approaches = []
             for approach_name, result in results.items():
                 job_id = result.get('job_id', f'job_{timestamp}_{approach_name}')
                 output_file = output_dir / f"{pdf_name}_{approach_name}_{job_id}.md"
                 metadata_file = output_dir / f"{pdf_name}_{approach_name}_{job_id}_metadata.json"
                 
-                if result['status'] == 'success':
-                    with open(output_file, 'w', encoding='utf-8') as f:
-                        f.write(result['markdown_content'])
-                
-                # Create comprehensive metadata
+                # Create comprehensive metadata for both success and failure
                 comprehensive_metadata = {
                     'source_pdf': Path(args.pdf_path).name,
-                    'output_markdown': output_file.name,
+                    'output_markdown': output_file.name if result['status'] == 'success' else None,
                     'processing_date': datetime.now().isoformat(),
                     'job_id': job_id,
                     'pages_processed': args.pages or "all",
                     'approach': approach_name,
+                    'status': result['status'],
                     'processing_time': {
                         'total': result.get('processing_time', 0)
                     },
                     'mistral_model': result.get('model', 'unknown'),
                     'formatting_prompt_length': result.get('formatting_prompt_length', 0),
-                    'markdown_length': len(result.get('markdown_content', '')),
+                    'markdown_length': len(result.get('markdown_content', '')) if result['status'] == 'success' else 0,
                     'raw_result': result
                 }
                 
+                # Handle success case
+                if result['status'] == 'success':
+                    with open(output_file, 'w', encoding='utf-8') as f:
+                        f.write(result['markdown_content'])
+                    console.print(f"[green]{approach_name} results saved to: {output_file}[/green]")
+                
+                # Handle error case
+                else:
+                    comprehensive_metadata.update({
+                        'error': result.get('error', 'Unknown error'),
+                        'error_type': result.get('error_type', 'UnknownError'),
+                        'failed_at': datetime.now().isoformat()
+                    })
+                    failed_approaches.append(approach_name)
+                    console.print(f"[red]{approach_name} failed: {result.get('error', 'Unknown error')}[/red]")
+                    console.print(f"[yellow]Error metadata saved to: {metadata_file}[/yellow]")
+                
+                # Always save metadata (success or failure)
                 with open(metadata_file, 'w', encoding='utf-8') as f:
                     json.dump(comprehensive_metadata, f, indent=2, default=str)
-                
-                console.print(f"[green]{approach_name} results saved to: {output_file}[/green]")
+            
+            # Report overall results
+            total_approaches = len(results)
+            successful_approaches = total_approaches - len(failed_approaches)
+            
+            console.print(f"\n[cyan]Summary: {successful_approaches}/{total_approaches} approaches completed successfully[/cyan]")
+            if failed_approaches:
+                console.print(f"[yellow]Failed approaches: {', '.join(failed_approaches)}[/yellow]")
+                # Exit with error if all approaches failed
+                if len(failed_approaches) == total_approaches:
+                    console.print("[red]All approaches failed![/red]")
+                    sys.exit(1)
             
         else:
             # Single approach
@@ -819,42 +862,93 @@ def main():
                 prompt = chat_ocr._get_laser_focused_prompt()
                 result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
             
-            # Save results with job ID
+            # Handle results with comprehensive error handling
             job_id = result.get('job_id', f'job_{timestamp}')
             output_file = output_dir / f"{pdf_name}_{args.approach}_{job_id}.md"
             metadata_file = output_dir / f"{pdf_name}_{args.approach}_{job_id}_metadata.json"
             
-            if result['status'] == 'success':
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    f.write(result['markdown_content'])
-            
-            # Create comprehensive metadata like pdf2md.py
+            # Create comprehensive metadata for both success and failure
             comprehensive_metadata = {
                 'source_pdf': Path(args.pdf_path).name,
-                'output_markdown': output_file.name,
+                'output_markdown': output_file.name if result['status'] == 'success' else None,
                 'processing_date': datetime.now().isoformat(),
                 'job_id': job_id,
                 'pages_processed': args.pages or "all",
                 'approach': args.approach,
+                'status': result['status'],
                 'processing_time': {
                     'total': result.get('processing_time', 0)
                 },
                 'mistral_model': result.get('model', 'unknown'),
                 'formatting_prompt_length': result.get('formatting_prompt_length', 0),
-                'markdown_length': len(result.get('markdown_content', '')),
-                'raw_result': result  # Include original result for completeness
+                'markdown_length': len(result.get('markdown_content', '')) if result['status'] == 'success' else 0,
+                'raw_result': result
             }
             
+            # Handle success case
+            if result['status'] == 'success':
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    f.write(result['markdown_content'])
+                console.print(f"[green]Results saved to: {output_file}[/green]")
+            
+            # Handle error case with comprehensive error metadata
+            else:
+                comprehensive_metadata.update({
+                    'error': result.get('error', 'Unknown error'),
+                    'error_type': result.get('error_type', 'UnknownError'),
+                    'failed_at': datetime.now().isoformat()
+                })
+                console.print(f"[red]Processing failed: {result.get('error', 'Unknown error')}[/red]")
+                console.print(f"[yellow]Error metadata saved to: {metadata_file}[/yellow]")
+            
+            # Always save metadata (success or failure)
             with open(metadata_file, 'w', encoding='utf-8') as f:
                 json.dump(comprehensive_metadata, f, indent=2, default=str)
             
-            console.print(f"[green]Results saved to: {output_file}[/green]")
+            # Exit with error code if processing failed
+            if result['status'] != 'success':
+                sys.exit(1)
         
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user[/yellow]")
         sys.exit(1)
     except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
+        # Create error metadata for unexpected exceptions
+        if 'args' in locals() and args.pdf_path:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            pdf_name = Path(args.pdf_path).stem
+            error_job_id = f"job_{timestamp}_{pdf_name}_error"
+            
+            error_metadata = {
+                'source_pdf': Path(args.pdf_path).name,
+                'processing_date': datetime.now().isoformat(),
+                'job_id': error_job_id,
+                'status': 'failed',
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'failed_at': datetime.now().isoformat(),
+                'approach': getattr(args, 'approach', 'unknown'),
+                'pages_processed': getattr(args, 'pages', None) or "all",
+                'failure_stage': 'main_cli_execution'
+            }
+            
+            # Try to save error metadata
+            try:
+                output_dir = Path(args.output_dir) if hasattr(args, 'output_dir') else Path("output")
+                output_dir.mkdir(exist_ok=True)
+                error_metadata_file = output_dir / f"{pdf_name}_error_{error_job_id}_metadata.json"
+                
+                with open(error_metadata_file, 'w', encoding='utf-8') as f:
+                    json.dump(error_metadata, f, indent=2, default=str)
+                
+                console.print(f"[red]Unexpected error: {e}[/red]")
+                console.print(f"[yellow]Error metadata saved to: {error_metadata_file}[/yellow]")
+            except Exception as save_error:
+                console.print(f"[red]Error: {e}[/red]")
+                console.print(f"[red]Failed to save error metadata: {save_error}[/red]")
+        else:
+            console.print(f"[red]Error: {e}[/red]")
+        
         sys.exit(1)
 
 

@@ -40,6 +40,11 @@ Convert a PDF to Markdown:
 python pdf2md.py input/document.pdf
 ```
 
+**Advanced formatting preservation** (recommended for TTRPG documents):
+```bash
+python pdf2md_chat.py input/document.pdf --approach laser_focused
+```
+
 Process specific pages:
 ```bash
 python pdf2md.py input/document.pdf --pages 1-10,15-20
@@ -52,10 +57,11 @@ python pdf2md.py input/document.pdf --no-optimize
 
 ## CLI Reference
 
-### Main Commands
+### Main Tools
 
+**Standard Tool** (`pdf2md.py`) - Full pipeline with optimization:
 ```bash
-# Convert PDF to Markdown
+# Convert PDF to Markdown with optimization
 python pdf2md.py <pdf_file> [options]
 
 # List recent processing jobs
@@ -65,16 +71,44 @@ python pdf2md.py --list-jobs
 python pdf2md.py --check-job <job_id>
 ```
 
+**Advanced Chat API Tool** (`pdf2md_chat.py`) - Superior formatting preservation:
+```bash
+# Advanced formatting preservation
+python pdf2md_chat.py <pdf_file> [options]
+
+# Test specific formatting approach
+python pdf2md_chat.py <pdf_file> --approach <approach_name>
+
+# Test all formatting approaches
+python pdf2md_chat.py <pdf_file> --approach all
+
+# Use custom formatting prompt
+python pdf2md_chat.py <pdf_file> --custom-prompt prompt.txt
+
+# Job management (same as pdf2md.py)
+python pdf2md_chat.py --list-jobs
+python pdf2md_chat.py --check-job <job_id>
+```
+
 ### Options
 
+**Standard Tool** (`pdf2md.py`):
 - `--pages`: Specify page ranges (e.g., "1-10,15-20")
 - `--no-optimize`: Skip PDF optimization step
 - `--keep-images`: Keep images during optimization
 - `--enhanced-formatting`: Enable enhanced formatting preservation for TTRPG documents
 - `--verbose`: Enable detailed output
 
+**Chat API Tool** (`pdf2md_chat.py`):
+- `--pages`: Specify page ranges (e.g., "1-3,5,7-9")
+- `--approach`: Choose formatting approach (see Formatting Approaches section)
+- `--custom-prompt`: Use custom formatting prompt from file
+- `--output-dir`: Output directory (default: "output")
+- `--model`: Mistral model to use (default: "mistral-small-latest")
+
 ### Examples
 
+**Standard Tool Examples:**
 ```bash
 # Basic conversion
 python pdf2md.py input/rulebook.pdf
@@ -97,6 +131,114 @@ python pdf2md.py --list-jobs
 # Get details about a specific job
 python pdf2md.py --check-job job_20240713_103045_rulebook
 ```
+
+**Chat API Tool Examples** (Superior formatting preservation):
+```bash
+# Best formatting preservation for TTRPG documents
+python pdf2md_chat.py input/rulebook.pdf --approach laser_focused
+
+# Test multiple formatting approaches
+python pdf2md_chat.py input/rulebook.pdf --approach all --pages 5-8
+
+# Aggressive formatting detection
+python pdf2md_chat.py input/character_sheet.pdf --approach style_hunter
+
+# Process specific pages with italic focus
+python pdf2md_chat.py input/bestiary.pdf --pages 12-25 --approach italic_focused
+
+# Use custom formatting prompt
+python pdf2md_chat.py input/custom_doc.pdf --custom-prompt my_prompt.txt
+
+# Quick test with minimal formatting
+python pdf2md_chat.py input/simple_doc.pdf --approach minimal --pages 1-3
+
+# Compare different approaches on same content
+python pdf2md_chat.py input/test_doc.pdf --approach all --pages 1-2
+```
+
+## Advanced Chat API Tool (`pdf2md_chat.py`)
+
+The Chat API tool uses Mistral's chat interface with document processing for **superior formatting preservation**. This approach is specifically designed for complex documents like TTRPG rulebooks where maintaining formatting (bold, italic, bold+italic) is critical.
+
+### Key Advantages
+
+- **Superior Format Detection**: Uses advanced prompting techniques to detect subtle formatting
+- **Multiple Approaches**: 8 different formatting strategies optimized for different content types
+- **Chat API Integration**: Leverages Mistral's document processing capabilities
+- **Page Extraction**: Built-in PDF page extraction for targeted processing
+- **Comprehensive Job Tracking**: Full job history and error handling
+
+### Formatting Approaches
+
+The tool includes 8 specialized formatting approaches:
+
+| Approach | Best For | Description |
+|----------|----------|-------------|
+| `default` | General documents | Balanced formatting preservation |
+| `aggressive` | Complex formatting | Zero-tolerance formatting detection |
+| `minimal` | Simple documents | Basic structure preservation |
+| `llamaparse` | TTRPG documents | Proven formatting patterns |
+| `italic_focused` | Italic-heavy content | Enhanced italic and bold+italic detection |
+| `style_hunter` | Complex layouts | Multi-layer formatting analysis |
+| `ultra_precise` | Known formatting issues | Targets specific formatting patterns |
+| `laser_focused` | **Recommended** | Optimized for TTRPG documents |
+
+### When to Use Each Tool
+
+**Use `pdf2md_chat.py` when:**
+- Working with TTRPG documents (character sheets, rulebooks, bestiaries)
+- Formatting preservation is critical (bold, italic, bold+italic text)
+- You need to test multiple formatting approaches
+- Processing specific page ranges for experimentation
+- Documents have complex formatting that needs preservation
+
+**Use `pdf2md.py` when:**
+- Processing large documents that benefit from optimization
+- Need full pipeline with PDF compression and image removal
+- Working with standard documents where basic formatting is sufficient
+- Want automatic optimization decisions
+
+### Chat API Features
+
+#### Page Range Processing
+```bash
+# Extract and process specific pages
+python pdf2md_chat.py input/book.pdf --pages "1-3,7,12-15"
+```
+
+#### Approach Testing
+```bash
+# Test single approach
+python pdf2md_chat.py input/doc.pdf --approach laser_focused
+
+# Test all approaches (great for comparison)
+python pdf2md_chat.py input/doc.pdf --approach all --pages 1-2
+```
+
+#### Custom Prompts
+```bash
+# Create custom_prompt.txt with your formatting instructions
+python pdf2md_chat.py input/doc.pdf --custom-prompt custom_prompt.txt
+```
+
+#### Rich Progress Display
+The tool provides real-time progress with:
+- Multi-step progress bars (Upload → Process → Finalize)
+- Processing time estimates
+- Professional result panels
+- Comprehensive error handling
+
+### Output Structure
+
+**Filename Pattern**: `{pdf_name}_{approach}_{job_id}.md`
+**Metadata**: `{pdf_name}_{approach}_{job_id}_metadata.json`
+
+**Comprehensive Metadata** includes:
+- Processing approach and parameters
+- Job tracking information
+- Formatting prompt details
+- Processing performance metrics
+- Complete error information (if applicable)
 
 ## Setup Guide
 
@@ -129,8 +271,9 @@ A test file is included for validation: `input/AW-Basic_Refbook.pdf`
 ### Components
 
 1. **pdf_optimizer.py**: PDF analysis and optimization
-2. **mistral_ocr.py**: Mistral OCR API integration
+2. **mistral_ocr.py**: Mistral OCR API integration  
 3. **pdf2md.py**: Main CLI application with progress tracking
+4. **pdf2md_chat.py**: Advanced Chat API tool with superior formatting preservation
 
 ### Processing Pipeline
 
@@ -205,11 +348,18 @@ Comprehensive processing information:
 
 ## API Integration
 
-### Mistral OCR
+### Mistral APIs Used
+
+**OCR API** (used by `pdf2md.py`):
 - **Documentation**: https://docs.mistral.ai/capabilities/OCR/basic_ocr/
-- **Pricing**: ~1000 pages per dollar
 - **Model**: mistral-ocr-latest
 - **Features**: Multilingual, formatting preservation, table extraction
+
+**Chat API** (used by `pdf2md_chat.py`):
+- **Documentation**: https://docs.mistral.ai/capabilities/completion/
+- **Model**: mistral-small-latest (configurable)
+- **Features**: Document processing, custom prompting, superior formatting control
+- **Pricing**: ~1000 pages per dollar (similar to OCR API)
 
 ### Format Preservation
 The tool uses aggressive formatting preservation based on successful TTRPG conversion patterns. The OCR process is optimized for:
@@ -226,6 +376,8 @@ The tool uses aggressive formatting preservation based on successful TTRPG conve
 - Mistral API key
 
 ### Testing
+
+**Standard Tool:**
 ```bash
 # Test with the included sample
 python pdf2md.py input/AW-Basic_Refbook.pdf --pages 1-5
@@ -235,6 +387,18 @@ python pdf_optimizer.py input/AW-Basic_Refbook.pdf
 
 # Test OCR module
 python mistral_ocr.py input/AW-Basic_Refbook.pdf
+```
+
+**Chat API Tool (Recommended for TTRPG content):**
+```bash
+# Test best formatting approach
+python pdf2md_chat.py input/AW-Basic_Refbook.pdf --approach laser_focused --pages 5-8
+
+# Compare multiple approaches
+python pdf2md_chat.py input/AW-Basic_Refbook.pdf --approach all --pages 5-6
+
+# Test italic detection (pages 5-8 contain italic and bold+italic text)
+python pdf2md_chat.py input/AW-Basic_Refbook.pdf --approach italic_focused --pages 5-8
 ```
 
 ## References
