@@ -9,8 +9,15 @@ This is a Python-based tool for converting PDF TTRPG (tabletop role-playing game
 ## Key Commands
 
 ### Main PDF to Markdown Conversion
+
+#### Standard OCR Approach (Original)
 ```bash
 python pdf2md.py <pdf_path>
+```
+
+#### Advanced Chat API Approach (Recommended for Better Formatting)
+```bash
+python pdf2md_chat.py <pdf_path>
 ```
 
 ### Installing Dependencies
@@ -21,13 +28,36 @@ pip install -r requirements.txt
 ### Testing Individual Components
 ```bash
 python pdf_optimizer.py <pdf_path>    # Test PDF optimization
-python mistral_ocr.py <pdf_path>      # Test OCR module
+python mistral_ocr.py <pdf_path>      # Test OCR module (standard)
+```
+
+### Advanced Chat API Options
+```bash
+# Different formatting approaches
+python pdf2md_chat.py <pdf_path> --approach laser_focused    # Best for bold/italic detection
+python pdf2md_chat.py <pdf_path> --approach italic_focused   # Enhanced italic detection
+python pdf2md_chat.py <pdf_path> --approach llamaparse       # LlamaParse-style prompts
+
+# Page range processing (cost optimization)
+python pdf2md_chat.py <pdf_path> --pages "5-8"
+python pdf2md_chat.py <pdf_path> --pages "1-10,15-20"
+
+# Custom prompts
+python pdf2md_chat.py <pdf_path> --custom-prompt my_prompt.txt
+
+# Test all approaches for comparison
+python pdf2md_chat.py <pdf_path> --test-all --pages "5-8"
 ```
 
 ### Job Management
 ```bash
+# Standard approach
 python pdf2md.py --list-jobs          # List recent jobs
 python pdf2md.py --check-job <id>     # Check job status
+
+# Chat API approach  
+python pdf2md_chat.py --list-jobs     # List recent jobs
+python pdf2md_chat.py --check-job <id># Check job status
 ```
 
 ## Architecture
@@ -49,13 +79,23 @@ The project now consists of three main components working together:
   - `process_with_formatting_prompt()`: Conversion with formatting preservation
   - `check_capabilities()`: Verify API status and features
 
-#### 3. **pdf2md.py**: Main CLI Application
-- `PDFToMarkdownConverter` class: Orchestrates the complete pipeline
+#### 3. **pdf2md.py**: Original CLI Application
+- `PDFToMarkdownConverter` class: Orchestrates the complete pipeline with standard OCR
 - Features:
   - Rich CLI interface with progress bars
   - Job tracking and history
   - Error handling and recovery
   - Metadata generation
+
+#### 4. **pdf2md_chat.py**: Advanced Chat API Application
+- `PDFToMarkdownChatConverter` class: Superior formatting preservation using Mistral Chat API
+- Features:
+  - Multiple formatting approaches (8 different strategies)
+  - Superior italic and bold-italic detection
+  - Custom prompt support
+  - Advanced job tracking with approach metadata
+  - Test all approaches functionality
+  - Page range optimization for cost savings
 
 ### Directory Structure
 - `input/`: Place PDF files here for processing (test file: `AW-Basic_Refbook.pdf`)
@@ -64,6 +104,8 @@ The project now consists of three main components working together:
 - `.jobs/`: Job tracking files for history and debugging
 
 ### Processing Pipeline
+
+#### Standard Pipeline (pdf2md.py)
 1. **Input Validation**: Check PDF exists and parse options
 2. **PDF Analysis**: Analyze structure, size, images using PDFOptimizer
 3. **Optimization**: Remove images and compress if beneficial
@@ -71,13 +113,38 @@ The project now consists of three main components working together:
 5. **Output Generation**: Save Markdown file and processing metadata
 6. **Job Tracking**: Record job details for future reference
 
+#### Advanced Chat Pipeline (pdf2md_chat.py)
+1. **Input Validation**: Check PDF exists and parse options
+2. **Job Initialization**: Create job ID and tracking metadata
+3. **Page Extraction**: Extract specific pages if range specified (cost optimization)
+4. **Prompt Selection**: Choose formatting approach or use custom prompt
+5. **File Upload**: Upload PDF to Mistral API with signed URL
+6. **Chat Processing**: Process with document + custom formatting prompts
+7. **Advanced Output**: Save with job tracking and comprehensive metadata
+8. **Results Display**: Show formatting statistics and job completion
+
 ## Important Context
 
 ### Formatting Preservation
-The README includes a critical prompt for formatting preservation when using LLM-based parsing:
-```python
-instruction = "MANDATORY FORMATTING REQUIREMENTS: You MUST NEVER ignore text formatting. ALWAYS convert bold text to **bold** markdown and italic text to *italic* markdown. FAILURE TO PRESERVE FORMATTING IS UNACCEPTABLE. Scan every single word for font weight changes, emphasis, and styling. Bold headings, author names, game titles, and emphasized terms are CRITICAL and must be preserved. This is a STRICT REQUIREMENT - do not skip any formatted text."
-```
+
+#### Standard OCR Approach
+Limited formatting preservation due to API constraints. Basic bold detection but struggles with italic and bold-italic combinations.
+
+#### Advanced Chat API Approach
+Superior formatting preservation with multiple specialized approaches:
+
+1. **laser_focused** (Recommended): Best overall detection for bold, italic, and bold-italic
+   - Successfully detects: `***stabilize and heal someone at 9:00 or past***`
+   - Successfully detects: `*a night in high luxury & company*`
+   - 27 bold, 29 italic, 2 bold-italic elements detected
+
+2. **italic_focused**: Enhanced italic detection with visual analysis
+   - 61 bold elements detected (5x improvement over standard)
+
+3. **llamaparse**: LlamaParse-proven formatting prompt
+   - Proven effective: "MANDATORY FORMATTING REQUIREMENTS: You MUST NEVER ignore text formatting..."
+
+4. **Other approaches**: aggressive, style_hunter, ultra_precise, default, minimal
 
 ### PDF Processing Limits
 The optimizer checks for LlamaParse-compatible limits:
