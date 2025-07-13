@@ -19,7 +19,9 @@ import fitz  # PyMuPDF
 from mistralai import Mistral
 from dotenv import load_dotenv
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
+from rich.table import Table
+from rich.panel import Panel
 
 # Load environment variables
 load_dotenv()
@@ -101,52 +103,56 @@ class MistralChatOCR:
             console.print(f"[blue]Processing PDF: {pdf_path.name}[/blue]")
             console.print(f"[blue]Using formatting prompt: {len(formatting_prompt)} characters[/blue]")
         
-        try:
-            # Upload the PDF file first
-            if self.verbose:
-                console.print("[yellow]Uploading PDF file...[/yellow]")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeRemainingColumn(),
+            console=console
+        ) as progress:
             
-            with open(pdf_path, "rb") as f:
-                uploaded_pdf = self.client.files.upload(
-                    file={
-                        "file_name": pdf_path.name,
-                        "content": f,
-                    },
-                    purpose="ocr"
-                )
+            # Overall task with 3 main steps
+            main_task = progress.add_task("[cyan]Converting PDF to Markdown", total=3)
             
-            # Get signed URL for the uploaded file
-            signed_url = self.client.files.get_signed_url(file_id=uploaded_pdf.id)
-            
-            if self.verbose:
-                console.print(f"[green]File uploaded successfully: {uploaded_pdf.id}[/green]")
-            
-            # Create the chat message with document and formatting instructions
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": formatting_prompt,
+            try:
+                # Step 1: Upload PDF file
+                progress.update(main_task, description="[yellow]Uploading PDF file...", advance=1)
+                
+                with open(pdf_path, "rb") as f:
+                    uploaded_pdf = self.client.files.upload(
+                        file={
+                            "file_name": pdf_path.name,
+                            "content": f,
                         },
-                        {
-                            "type": "document_url",
-                            "document_url": signed_url.url,
-                        },
-                    ],
-                }
-            ]
-            
-            if self.verbose:
-                console.print("[yellow]Submitting to Mistral Chat API...[/yellow]")
-            
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console
-            ) as progress:
-                task = progress.add_task("Processing document...", total=None)
+                        purpose="ocr"
+                    )
+                
+                # Get signed URL for the uploaded file
+                signed_url = self.client.files.get_signed_url(file_id=uploaded_pdf.id)
+                
+                if self.verbose:
+                    console.print(f"[green]File uploaded successfully: {uploaded_pdf.id}[/green]")
+                
+                # Step 2: Prepare and submit to API
+                progress.update(main_task, description="[blue]Processing with Mistral Chat API...", advance=1)
+                
+                # Create the chat message with document and formatting instructions
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": formatting_prompt,
+                            },
+                            {
+                                "type": "document_url",
+                                "document_url": signed_url.url,
+                            },
+                        ],
+                    }
+                ]
                 
                 # Submit to Mistral Chat API
                 chat_response = self.client.chat.complete(
@@ -154,69 +160,69 @@ class MistralChatOCR:
                     messages=messages,
                 )
                 
-                progress.update(task, description="Complete!")
-            
-            # Extract markdown content from response
-            markdown_content = chat_response.choices[0].message.content
-            
-            processing_time = time.time() - start_time
-            
-            result = {
-                'status': 'success',
-                'input_file': str(original_pdf_path),
-                'markdown_content': markdown_content,
-                'processing_time': processing_time,
-                'model': self.model,
-                'formatting_prompt_length': len(formatting_prompt),
-                'page_ranges': page_ranges,
-                'job_id': job_id,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            # Update job status to completed
-            job_data['status'] = 'completed'
-            job_data['end_time'] = datetime.now().isoformat()
-            job_data['processing_time'] = processing_time
-            job_data['markdown_length'] = len(markdown_content)
-            job_data['model'] = self.model
-            self._save_job(job_id, job_data)
-            
-            # Clean up temporary file if created
-            if temp_file and pdf_path.exists():
-                pdf_path.unlink()
-            
-            if self.verbose:
-                console.print(f"[green]Chat OCR completed in {processing_time:.1f} seconds[/green]")
-                console.print(f"[green]Generated {len(markdown_content)} characters of markdown[/green]")
-            
-            return result
-            
-        except Exception as e:
-            # Update job with error
-            job_data['status'] = 'failed'
-            job_data['error'] = str(e)
-            job_data['error_type'] = type(e).__name__
-            job_data['end_time'] = datetime.now().isoformat()
-            self._save_job(job_id, job_data)
-            
-            # Clean up temporary file if created
-            if 'temp_file' in locals() and temp_file and pdf_path.exists():
-                pdf_path.unlink()
+                # Step 3: Extract and finalize results
+                progress.update(main_task, description="[green]Finalizing results...", advance=1)
                 
-            error_result = {
-                'status': 'error',
-                'input_file': str(original_pdf_path if 'original_pdf_path' in locals() else pdf_path),
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'page_ranges': page_ranges,
-                'job_id': job_id,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            if self.verbose:
-                console.print(f"[red]Chat OCR failed: {e}[/red]")
-            
-            return error_result
+                # Extract markdown content from response
+                markdown_content = chat_response.choices[0].message.content
+                
+                processing_time = time.time() - start_time
+                
+                result = {
+                    'status': 'success',
+                    'input_file': str(original_pdf_path),
+                    'markdown_content': markdown_content,
+                    'processing_time': processing_time,
+                    'model': self.model,
+                    'formatting_prompt_length': len(formatting_prompt),
+                    'page_ranges': page_ranges,
+                    'job_id': job_id,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                # Update job status to completed
+                job_data['status'] = 'completed'
+                job_data['end_time'] = datetime.now().isoformat()
+                job_data['processing_time'] = processing_time
+                job_data['markdown_length'] = len(markdown_content)
+                job_data['model'] = self.model
+                self._save_job(job_id, job_data)
+                
+                # Clean up temporary file if created
+                if temp_file and pdf_path.exists():
+                    pdf_path.unlink()
+                
+                # Display results with Rich panel
+                self._display_results(result, processing_time, len(markdown_content))
+                
+                return result
+                
+            except Exception as e:
+                # Update job with error
+                job_data['status'] = 'failed'
+                job_data['error'] = str(e)
+                job_data['error_type'] = type(e).__name__
+                job_data['end_time'] = datetime.now().isoformat()
+                self._save_job(job_id, job_data)
+                
+                # Clean up temporary file if created
+                if 'temp_file' in locals() and temp_file and pdf_path.exists():
+                    pdf_path.unlink()
+                    
+                error_result = {
+                    'status': 'error',
+                    'input_file': str(original_pdf_path if 'original_pdf_path' in locals() else pdf_path),
+                    'error': str(e),
+                    'error_type': type(e).__name__,
+                    'page_ranges': page_ranges,
+                    'job_id': job_id,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                if self.verbose:
+                    console.print(f"[red]Chat OCR failed: {e}[/red]")
+                
+                return error_result
     
     def _extract_pages(self, pdf_path: Path, page_ranges: str) -> Path:
         """
@@ -645,6 +651,24 @@ Scan every single word for font weight AND slant changes. Convert this PDF to ma
         job_file = self.jobs_dir / f"{job_id}.json"
         with open(job_file, 'w') as f:
             json.dump(job_data, f, indent=2, default=str)
+    
+    def _display_results(self, result: Dict[str, Any], processing_time: float, markdown_length: int):
+        """Display conversion results with Rich panel"""
+        panel = Panel.fit(
+            f"""[bold green]✓ Conversion completed successfully![/bold green]
+            
+[bold]Job ID:[/bold] {result['job_id']}
+[bold]Input:[/bold] {Path(result['input_file']).name}
+[bold]Pages:[/bold] {result['page_ranges'] or 'all'}
+[bold]Processing time:[/bold] {processing_time:.1f}s
+[bold]Markdown length:[/bold] {markdown_length} characters
+[bold]Model:[/bold] {result['model']}
+[bold]Prompt length:[/bold] {result['formatting_prompt_length']} characters""",
+            title="Conversion Results",
+            border_style="green"
+        )
+        
+        console.print("\n", panel)
 
 
 def main():
