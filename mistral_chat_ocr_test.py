@@ -310,6 +310,10 @@ Output only the converted markdown content with no additional commentary.
             'aggressive': self._get_aggressive_formatting_prompt(),
             'minimal': self._get_minimal_formatting_prompt(),
             'llamaparse': self._get_llamaparse_formatting_prompt(),
+            'italic_focused': self._get_italic_focused_prompt(),
+            'style_hunter': self._get_style_hunter_prompt(),
+            'ultra_precise': self._get_ultra_precise_prompt(),
+            'laser_focused': self._get_laser_focused_prompt(),
         }
         
         results = {}
@@ -369,6 +373,173 @@ MANDATORY FORMATTING REQUIREMENTS: You MUST NEVER ignore text formatting. ALWAYS
 
 Convert this PDF document to markdown format with the above formatting requirements strictly enforced.
 """
+    
+    def _get_italic_focused_prompt(self) -> str:
+        """Enhanced prompt specifically targeting italic and combined formatting detection."""
+        return """
+CRITICAL ITALIC AND FORMATTING DETECTION PROTOCOL:
+
+You are an expert typography analyzer. Your mission is to detect and preserve ALL text styling with surgical precision.
+
+MANDATORY DETECTION REQUIREMENTS:
+1. **ITALIC TEXT**: Any slanted, angled, or stylistically different text becomes *italic*
+2. **BOLD TEXT**: Any thick, heavy, or emphasized text becomes **bold**
+3. **BOLD+ITALIC**: Text that is both thick AND slanted becomes ***bold+italic***
+4. **UNDERLINED**: Convert to **bold** (markdown limitation)
+5. **ALL CAPS**: Often indicates emphasis - make **bold** unless clearly just capitalization
+
+VISUAL ANALYSIS PROTOCOL:
+- Examine EVERY word for font weight differences (thickness variations)
+- Look for font slant/angle changes (italic indicators) 
+- Detect font style shifts within sentences
+- Identify emphasis patterns: spacing, sizing, styling
+- Note any visual emphasis markers: bullets, dashes, special characters
+
+SPECIFIC TEXT PATTERNS TO WATCH:
+- Game terms, rules, mechanics (often italicized)
+- Move names, ability names (often bold or bold+italic)
+- Flavor text, quotes (often italic)
+- Section headers (often bold)
+- Important instructions (often bold or italic)
+- Character names, place names (often italic)
+
+FORMATTING SYNTAX:
+- Single emphasis: *italic text*
+- Strong emphasis: **bold text**  
+- Combined emphasis: ***bold and italic text***
+
+ZERO TOLERANCE POLICY: Do not miss ANY styled text. Every font change must be captured.
+
+Convert the PDF document now with complete style preservation.
+"""
+    
+    def _get_style_hunter_prompt(self) -> str:
+        """Aggressive style hunting prompt using multiple detection strategies."""
+        return """
+STYLE HUNTER MODE ACTIVATED - MAXIMUM FORMATTING PRESERVATION
+
+You are a forensic typography expert. Hunt down every single style variation in this document.
+
+MULTI-LAYER DETECTION STRATEGY:
+
+LAYER 1 - VISUAL WEIGHT ANALYSIS:
+- Scan for ANY thickness variations between words
+- Thick/heavy text = **bold**
+- Normal weight = no formatting
+- Light text = check if it should be emphasized differently
+
+LAYER 2 - SLANT/ANGLE DETECTION:
+- Look for ANY text that appears slanted or angled
+- Slanted text = *italic*
+- Forward-leaning characters = *italic*
+- Stylistic font variations = *italic*
+
+LAYER 3 - COMBINED STYLE DETECTION:
+- Text that is BOTH thick AND slanted = ***bold+italic***
+- Text that is thick with underlines = **bold**
+- Text in special fonts or styles = appropriate markdown
+
+LAYER 4 - CONTEXTUAL EMPHASIS DETECTION:
+- Words set apart by spacing = likely *italic* or **bold**
+- Terms in quotation marks = often *italic*
+- Technical terms = often *italic*
+- Important warnings/notes = often **bold**
+- Game mechanics = mix of **bold** and *italic*
+
+LAYER 5 - SEMANTIC FORMATTING HINTS:
+- Character abilities/moves = **bold** or ***bold+italic***
+- Flavor text/descriptions = *italic*
+- Rules/mechanics = **bold**
+- Examples = *italic*
+- Warnings/important notes = **bold**
+
+CRITICAL PATTERNS FOR TTRPG DOCUMENTS:
+- Move names: "Sixth sense", "Battlefield grace" = likely **bold**
+- Game terms: "roll+weird", "Hx", stat names = likely **bold**
+- Descriptive text: background flavor = likely *italic*
+- Instructions: "when you...", "on a hit..." = check for **bold**
+
+OUTPUT REQUIREMENTS:
+- Use *single asterisks* for italic
+- Use **double asterisks** for bold  
+- Use ***triple asterisks*** for bold+italic
+- Preserve ALL detected styling without exception
+
+Execute comprehensive style detection now.
+"""
+    
+    def _get_ultra_precise_prompt(self) -> str:
+        """Ultra-aggressive prompt targeting specific formatting patterns known to exist."""
+        return """
+CRITICAL MISSION: DETECT SUBTLE ITALIC AND BOLD-ITALIC FORMATTING
+
+You are a master typography forensics expert. This PDF contains specific formatting that MUST be detected:
+
+TARGET FORMATTING EXAMPLES THAT EXIST IN THIS DOCUMENT:
+1. "stabilize and heal someone at 9:00 or past" = ***BOLD-ITALIC*** (thick AND slanted)
+2. "Visions of death" = ***BOLD-ITALIC*** (thick AND slanted)  
+3. Long descriptive passages like "a night in high luxury & company; any weapon, gear..." = *ITALIC* (slanted only)
+
+ULTRA-PRECISE DETECTION PROTOCOL:
+
+PHASE 1 - FONT WEIGHT DETECTION:
+- THICK/HEAVY text = **bold**
+- NORMAL weight text = no formatting
+- Examine every single word for thickness variations
+
+PHASE 2 - FONT SLANT DETECTION: 
+- ANY slanted/angled text = *italic*
+- Forward-leaning characters = *italic*
+- Look for subtle angle differences from vertical text
+- Even slight slants must be detected
+
+PHASE 3 - COMBINED STYLE DETECTION:
+- Text that is BOTH thick AND slanted = ***bold-italic***
+- This is CRITICAL - many important terms use bold-italic
+- Look especially at: move names, special terms, emphasized phrases
+
+PHASE 4 - CONTEXTUAL CLUES:
+- Game move names often bold-italic: "Visions of death", "stabilize and heal"
+- Long descriptive text often italic: equipment lists, flavor text
+- Technical terms often italic: "hi-tech", "bodyguard"
+- Rules text often bold-italic when emphasized
+
+MANDATORY MARKDOWN OUTPUT:
+- Slanted text only: *italic text*
+- Thick text only: **bold text**  
+- Thick AND slanted: ***bold-italic text***
+
+FAILURE CRITERIA: Missing ANY slanted text is unacceptable failure.
+
+SCANNING INSTRUCTIONS:
+1. Examine EVERY word individually for slant and weight
+2. Pay special attention to phrases starting with "when you", "on a hit", ability names
+3. Look for italicized equipment lists and descriptions
+4. Detect bold-italic move names and special terms
+5. Do not assume - verify every character's visual properties
+
+ZERO TOLERANCE: You must detect the italic and bold-italic text that exists in this document.
+
+Begin ultra-precise typography analysis now.
+"""
+    
+    def _get_laser_focused_prompt(self) -> str:
+        """Laser-focused prompt targeting the exact known formatting issues."""
+        return """
+MANDATORY FORMATTING REQUIREMENTS: You MUST NEVER ignore text formatting. ALWAYS convert bold text to **bold** markdown and italic text to *italic* markdown. FAILURE TO PRESERVE FORMATTING IS UNACCEPTABLE.
+
+CRITICAL: This document contains these specific formats that MUST be detected:
+- "stabilize and heal someone at 9:00 or past" should be ***bold-italic***
+- "Visions of death" should be ***bold-italic***  
+- Equipment descriptions like "a night in high luxury & company; any weapon, gear..." should be *italic*
+
+DETECTION PRIORITY:
+1. Look for slanted/angled text = *italic*
+2. Look for thick text = **bold**  
+3. Look for thick AND slanted text = ***bold-italic***
+
+Scan every single word for font weight AND slant changes. Convert this PDF to markdown preserving ALL formatting.
+"""
 
 
 def main():
@@ -377,7 +548,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="Test Mistral Chat OCR for formatting preservation")
     parser.add_argument("pdf_path", help="Path to PDF file")
-    parser.add_argument("--approach", choices=['default', 'aggressive', 'minimal', 'llamaparse', 'all'], 
+    parser.add_argument("--approach", choices=['default', 'aggressive', 'minimal', 'llamaparse', 'italic_focused', 'style_hunter', 'ultra_precise', 'laser_focused', 'all'], 
                        default='default', help="Formatting approach to test")
     parser.add_argument("--output-dir", default="output", help="Output directory")
     parser.add_argument("--model", default="mistral-small-latest", help="Mistral model to use")
@@ -451,6 +622,18 @@ def main():
                 result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
             elif args.approach == 'llamaparse':
                 prompt = chat_ocr._get_llamaparse_formatting_prompt()
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
+            elif args.approach == 'italic_focused':
+                prompt = chat_ocr._get_italic_focused_prompt()
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
+            elif args.approach == 'style_hunter':
+                prompt = chat_ocr._get_style_hunter_prompt()
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
+            elif args.approach == 'ultra_precise':
+                prompt = chat_ocr._get_ultra_precise_prompt()
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
+            elif args.approach == 'laser_focused':
+                prompt = chat_ocr._get_laser_focused_prompt()
                 result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
             
             # Save results
