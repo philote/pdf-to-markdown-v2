@@ -11,6 +11,7 @@ import sys
 import json
 import time
 import tempfile
+import signal
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -27,6 +28,31 @@ from rich.panel import Panel
 load_dotenv()
 
 console = Console()
+
+
+class APITimeoutError(Exception):
+    """Raised when API call exceeds timeout"""
+    pass
+
+
+class TimeoutContext:
+    """Context manager for API call timeouts"""
+    def __init__(self, timeout_seconds: int = 180):  # 3 minute default
+        self.timeout_seconds = timeout_seconds
+        self.old_handler = None
+    
+    def __enter__(self):
+        def timeout_handler(signum, frame):
+            raise APITimeoutError(f"API call timed out after {self.timeout_seconds} seconds")
+        
+        self.old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(self.timeout_seconds)
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        signal.alarm(0)
+        if self.old_handler:
+            signal.signal(signal.SIGALRM, self.old_handler)
 
 
 class MistralChatOCR:
@@ -131,11 +157,24 @@ class MistralChatOCR:
                 # Get signed URL for the uploaded file
                 signed_url = self.client.files.get_signed_url(file_id=uploaded_pdf.id)
                 
+                # Update job with upload details
+                job_data['mistral_api'] = {
+                    'file_upload_id': uploaded_pdf.id,
+                    'signed_url': signed_url.url,
+                    'upload_timestamp': datetime.now().isoformat()
+                }
+                self._save_job(job_id, job_data)
+                
                 if self.verbose:
                     console.print(f"[green]File uploaded successfully: {uploaded_pdf.id}[/green]")
                 
                 # Step 2: Prepare and submit to API
-                progress.update(main_task, description="[blue]Processing with Mistral Chat API...", advance=1)
+                progress.update(main_task, description="[blue]Preparing chat request...", advance=0.5)
+                
+                # Update job with pre-submission status
+                job_data['mistral_api']['pre_chat_timestamp'] = datetime.now().isoformat()
+                job_data['current_stage'] = 'preparing_chat_request'
+                self._save_job(job_id, job_data)
                 
                 # Create the chat message with document and formatting instructions
                 messages = [
@@ -154,11 +193,63 @@ class MistralChatOCR:
                     }
                 ]
                 
-                # Submit to Mistral Chat API
-                chat_response = self.client.chat.complete(
-                    model=self.model,
-                    messages=messages,
-                )
+                # Submit to Mistral Chat API with timeout tracking
+                progress.update(main_task, description="[yellow]Waiting for Mistral Chat API response...", advance=0.5)
+                
+                # Update job status before API call
+                job_data['current_stage'] = 'waiting_for_chat_response'
+                job_data['mistral_api']['chat_request_timestamp'] = datetime.now().isoformat()
+                self._save_job(job_id, job_data)
+                
+                # Make the API call with timeout - this is where hangs typically occur
+                api_start_time = time.time()
+                try:
+                    with TimeoutContext(timeout_seconds=300):  # 5 minute timeout
+                        chat_response = self.client.chat.complete(
+                            model=self.model,
+                            messages=messages,
+                        )
+                    
+                    api_duration = time.time() - api_start_time
+                    
+                    # Immediately update job with successful API response
+                    job_data['current_stage'] = 'processing_response'
+                    job_data['mistral_api']['api_response_duration'] = api_duration
+                    self._save_job(job_id, job_data)
+                    
+                    if self.verbose:
+                        console.print(f"[green]API response received in {api_duration:.1f}s[/green]")
+                    
+                except APITimeoutError as timeout_error:
+                    api_duration = time.time() - api_start_time
+                    job_data['current_stage'] = 'api_timeout'
+                    job_data['mistral_api']['api_timeout'] = str(timeout_error)
+                    job_data['mistral_api']['api_timeout_duration'] = api_duration
+                    self._save_job(job_id, job_data)
+                    console.print(f"[red]API call timed out after {api_duration:.1f}s[/red]")
+                    raise timeout_error
+                    
+                except Exception as api_error:
+                    api_duration = time.time() - api_start_time
+                    job_data['current_stage'] = 'api_error'
+                    job_data['mistral_api']['api_error'] = str(api_error)
+                    job_data['mistral_api']['api_error_duration'] = api_duration
+                    self._save_job(job_id, job_data)
+                    console.print(f"[red]API error after {api_duration:.1f}s: {api_error}[/red]")
+                    raise api_error
+                
+                # Update job with chat response details
+                job_data['mistral_api'].update({
+                    'chat_response_id': getattr(chat_response, 'id', None),
+                    'chat_model': chat_response.model,
+                    'chat_timestamp': datetime.now().isoformat(),
+                    'usage': {
+                        'prompt_tokens': getattr(chat_response.usage, 'prompt_tokens', None) if hasattr(chat_response, 'usage') else None,
+                        'completion_tokens': getattr(chat_response.usage, 'completion_tokens', None) if hasattr(chat_response, 'usage') else None,
+                        'total_tokens': getattr(chat_response.usage, 'total_tokens', None) if hasattr(chat_response, 'usage') else None
+                    }
+                })
+                self._save_job(job_id, job_data)
                 
                 # Step 3: Extract and finalize results
                 progress.update(main_task, description="[green]Finalizing results...", advance=1)
@@ -180,12 +271,21 @@ class MistralChatOCR:
                     'timestamp': datetime.now().isoformat()
                 }
                 
-                # Update job status to completed
+                # Update job status to completed with final details
                 job_data['status'] = 'completed'
                 job_data['end_time'] = datetime.now().isoformat()
                 job_data['processing_time'] = processing_time
                 job_data['markdown_length'] = len(markdown_content)
                 job_data['model'] = self.model
+                job_data['formatting_prompt_length'] = len(formatting_prompt)
+                
+                # Add complete API interaction summary
+                job_data['mistral_api'].update({
+                    'completion_timestamp': datetime.now().isoformat(),
+                    'response_content_length': len(markdown_content),
+                    'formatting_prompt_length': len(formatting_prompt)
+                })
+                
                 self._save_job(job_id, job_data)
                 
                 # Clean up temporary file if created
@@ -198,11 +298,16 @@ class MistralChatOCR:
                 return result
                 
             except Exception as e:
-                # Update job with error
+                # Update job with error and preserve any API details captured
                 job_data['status'] = 'failed'
                 job_data['error'] = str(e)
                 job_data['error_type'] = type(e).__name__
                 job_data['end_time'] = datetime.now().isoformat()
+                
+                # Add error timestamp to API details if they exist
+                if 'mistral_api' in job_data:
+                    job_data['mistral_api']['error_timestamp'] = datetime.now().isoformat()
+                
                 self._save_job(job_id, job_data)
                 
                 # Clean up temporary file if created
@@ -625,15 +730,47 @@ Scan every single word for font weight AND slant changes. Convert this PDF to ma
             job = json.load(f)
         
         from rich.panel import Panel
-        panel = Panel.fit(
-            f"""[bold]Job ID:[/bold] {job['id']}
+        # Calculate timing information
+        start_time = datetime.fromisoformat(job['start_time'])
+        current_time = datetime.now()
+        elapsed_time = (current_time - start_time).total_seconds()
+        
+        # Build panel content with current stage info
+        panel_content = f"""[bold]Job ID:[/bold] {job['id']}
 [bold]Status:[/bold] {job['status']}
 [bold]Input:[/bold] {job['input_file']}
 [bold]Started:[/bold] {job['start_time']}
+[bold]Elapsed Time:[/bold] {elapsed_time:.1f}s
 [bold]Pages:[/bold] {job.get('page_ranges', 'all')}
-[bold]Prompt Type:[/bold] {job.get('formatting_prompt_type', 'unknown')}""",
+[bold]Prompt Type:[/bold] {job.get('formatting_prompt_type', 'unknown')}"""
+
+        # Add current stage information for in-progress jobs
+        if job['status'] == 'started' and 'current_stage' in job:
+            stage = job['current_stage']
+            panel_content += f"\n[bold]Current Stage:[/bold] {stage}"
+            
+            # Add stage-specific timing
+            if 'mistral_api' in job:
+                api_data = job['mistral_api']
+                if stage == 'waiting_for_chat_response' and 'chat_request_timestamp' in api_data:
+                    request_time = datetime.fromisoformat(api_data['chat_request_timestamp'])
+                    wait_duration = (current_time - request_time).total_seconds()
+                    panel_content += f"\n[bold]API Wait Time:[/bold] {wait_duration:.1f}s"
+                    
+                    if wait_duration > 120:  # Over 2 minutes
+                        panel_content += f"\n[red]⚠️  Long API wait detected[/red]"
+        
+        # Color the border based on status and timing
+        border_color = "cyan"
+        if job['status'] == 'started' and elapsed_time > 300:  # Over 5 minutes
+            border_color = "yellow"
+        elif job['status'] == 'started' and elapsed_time > 600:  # Over 10 minutes
+            border_color = "red"
+            
+        panel = Panel.fit(
+            panel_content,
             title=f"Job Details - {job_id}",
-            border_style="cyan"
+            border_style=border_color
         )
         
         console.print(panel)
@@ -643,8 +780,73 @@ Scan every single word for font weight AND slant changes. Convert this PDF to ma
             console.print(f"  Processing time: {job.get('processing_time', 'N/A'):.1f}s")
             console.print(f"  Markdown length: {job.get('markdown_length', 'N/A')} characters")
             console.print(f"  Model used: {job.get('model', 'N/A')}")
+            
+            # Display Mistral API details if available
+            if 'mistral_api' in job:
+                api_data = job['mistral_api']
+                console.print("\n[cyan]Mistral API Details:[/cyan]")
+                console.print(f"  File upload ID: {api_data.get('file_upload_id', 'N/A')}")
+                console.print(f"  Chat response ID: {api_data.get('chat_response_id', 'N/A')}")
+                
+                if 'usage' in api_data and api_data['usage']['total_tokens']:
+                    usage = api_data['usage']
+                    console.print(f"  Token usage: {usage['total_tokens']} total ({usage['prompt_tokens']} prompt + {usage['completion_tokens']} completion)")
+                    
         elif job['status'] == 'failed' and 'error' in job:
             console.print(f"\n[red]Error: {job['error']}[/red]")
+            
+            # Display API details if available even for failed jobs
+            if 'mistral_api' in job:
+                api_data = job['mistral_api']
+                console.print("\n[yellow]Mistral API Details (before failure):[/yellow]")
+                if 'file_upload_id' in api_data:
+                    console.print(f"  File upload ID: {api_data['file_upload_id']}")
+                if 'chat_response_id' in api_data:
+                    console.print(f"  Chat response ID: {api_data['chat_response_id']}")
+                if 'usage' in api_data and api_data['usage']['total_tokens']:
+                    usage = api_data['usage']
+                    console.print(f"  Token usage: {usage['total_tokens']} total")
+    
+    def check_hung_jobs(self):
+        """Check for jobs that may be hung or stuck"""
+        jobs = []
+        current_time = datetime.now()
+        
+        for job_file in self.jobs_dir.glob("*.json"):
+            with open(job_file, 'r') as f:
+                job = json.load(f)
+                
+            # Only check jobs that are still "started"
+            if job['status'] == 'started':
+                start_time = datetime.fromisoformat(job['start_time'])
+                elapsed_time = (current_time - start_time).total_seconds()
+                
+                # Consider jobs hung if they've been running for more than 10 minutes
+                if elapsed_time > 600:
+                    job['elapsed_time'] = elapsed_time
+                    jobs.append(job)
+        
+        if not jobs:
+            console.print("[green]No hung jobs detected[/green]")
+            return
+            
+        console.print(f"[yellow]Found {len(jobs)} potentially hung job(s):[/yellow]\n")
+        
+        for job in jobs:
+            console.print(f"[red]🚨 Job: {job['id']}[/red]")
+            console.print(f"   Started: {job['start_time']}")
+            console.print(f"   Elapsed: {job['elapsed_time']:.1f}s ({job['elapsed_time']/60:.1f} minutes)")
+            console.print(f"   Stage: {job.get('current_stage', 'unknown')}")
+            
+            # Show API wait time if stuck in API call
+            if 'mistral_api' in job and 'chat_request_timestamp' in job['mistral_api']:
+                request_time = datetime.fromisoformat(job['mistral_api']['chat_request_timestamp'])
+                api_wait_time = (current_time - request_time).total_seconds()
+                console.print(f"   API Wait: {api_wait_time:.1f}s")
+                
+            console.print(f"   File: {job['input_file']}")
+            console.print(f"   Use: python pdf2md_chat.py --check-job {job['id']}")
+            console.print("")
     
     def _save_job(self, job_id: str, job_data: Dict[str, Any]):
         """Save job data to file"""
@@ -687,6 +889,7 @@ def main():
     # Job management
     parser.add_argument("--list-jobs", action="store_true", help="List recent processing jobs")
     parser.add_argument("--check-job", help="Check specific job status")
+    parser.add_argument("--check-hung", action="store_true", help="Check for hung/stuck jobs")
     
     args = parser.parse_args()
     
@@ -704,6 +907,9 @@ def main():
             return
         elif args.check_job:
             chat_ocr.check_job(args.check_job)
+            return
+        elif args.check_hung:
+            chat_ocr.check_hung_jobs()
             return
         
         # Check if PDF file was provided for processing
