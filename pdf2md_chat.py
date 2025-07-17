@@ -24,10 +24,28 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 from rich.table import Table
 from rich.panel import Panel
 
+from pdf_optimizer import PDFOptimizer
+
 # Load environment variables
 load_dotenv()
 
 console = Console()
+
+
+class DummyProgress:
+    """Dummy progress class that provides the same interface as Rich Progress but does nothing."""
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        pass
+    
+    def add_task(self, description, total=None):
+        return "dummy_task"
+    
+    def update(self, task_id, description=None, advance=None, **kwargs):
+        pass
 
 
 class APITimeoutError(Exception):
@@ -60,7 +78,7 @@ class MistralChatOCR:
     Mistral Chat API integration for document processing with custom formatting prompts.
     """
     
-    def __init__(self, api_key: Optional[str] = None, model: str = "mistral-small-latest", verbose: bool = True):
+    def __init__(self, api_key: Optional[str] = None, model: str = "mistral-small-latest", verbose: bool = True, enable_fallback: bool = True):
         """
         Initialize the Mistral Chat OCR client.
         
@@ -68,6 +86,7 @@ class MistralChatOCR:
             api_key: Mistral API key (if None, loads from environment)
             model: Model to use for chat completions
             verbose: Enable verbose output
+            enable_fallback: Enable automatic fallback to OCR API on Chat API failures
         """
         self.api_key = api_key or os.getenv("MISTRAL_API_KEY")
         if not self.api_key:
@@ -76,14 +95,33 @@ class MistralChatOCR:
         self.client = Mistral(api_key=self.api_key)
         self.model = model
         self.verbose = verbose
+        self.enable_fallback = enable_fallback
         self.jobs_dir = Path(".jobs")
         self.jobs_dir.mkdir(exist_ok=True)
         
-        if self.verbose:
+        # Initialize PDF optimizer
+        self.optimizer = PDFOptimizer(verbose=False)  # We'll handle output ourselves
+        
+        # Initialize OCR fallback if enabled
+        self.ocr_fallback = None
+        if enable_fallback:
+            try:
+                from mistral_ocr import MistralOCR
+                self.ocr_fallback = MistralOCR(api_key=self.api_key, verbose=False)
+                if self.verbose:
+                    console.print(f"[green]Initialized Mistral Chat OCR with OCR fallback enabled[/green]")
+            except ImportError:
+                if self.verbose:
+                    console.print(f"[yellow]OCR fallback not available (mistral_ocr.py not found)[/yellow]")
+        
+        if self.verbose and not enable_fallback:
             console.print(f"[green]Initialized Mistral Chat OCR with model: {self.model}[/green]")
     
     def process_pdf_with_chat(self, pdf_path: str, formatting_prompt: Optional[str] = None, 
-                            page_ranges: Optional[str] = None) -> Dict[str, Any]:
+                            page_ranges: Optional[str] = None, skip_optimization: bool = False, 
+                            keep_images: bool = False, chunk_size: int = 15, 
+                            chunk_threshold: int = 20, disable_chunking: bool = False,
+                            show_progress: bool = True) -> Dict[str, Any]:
         """
         Process PDF using Mistral Chat API with custom formatting instructions.
         
@@ -91,6 +129,11 @@ class MistralChatOCR:
             pdf_path: Path to PDF file
             formatting_prompt: Custom prompt for formatting preservation
             page_ranges: Optional page ranges (e.g., "1-3,5,7-9")
+            skip_optimization: Skip PDF optimization step
+            keep_images: Keep images during optimization
+            chunk_size: Pages per chunk for large documents (default: 15)
+            chunk_threshold: Page count threshold to trigger chunking (default: 20)
+            disable_chunking: Disable automatic chunking for large documents
             
         Returns:
             Dict with processing results
@@ -129,26 +172,81 @@ class MistralChatOCR:
             console.print(f"[blue]Processing PDF: {pdf_path.name}[/blue]")
             console.print(f"[blue]Using formatting prompt: {len(formatting_prompt)} characters[/blue]")
         
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeRemainingColumn(),
-            console=console
-        ) as progress:
+        # Create progress context only if requested
+        if show_progress:
+            progress_context = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeRemainingColumn(),
+                console=console
+            )
+        else:
+            progress_context = None
+        
+        with progress_context if show_progress else DummyProgress() as progress:
             
-            # Overall task with 3 main steps
-            main_task = progress.add_task("[cyan]Converting PDF to Markdown", total=3)
+            # Overall task with 5 main steps (analysis, optimization, upload, process, finalize)
+            main_task = progress.add_task("[cyan]Converting PDF to Markdown", total=5)
             
             try:
-                # Step 1: Upload PDF file
+                # Step 1: Analyze PDF
+                progress.update(main_task, description="[cyan]Analyzing PDF...", advance=1)
+                analysis = self.optimizer.analyze_pdf(str(pdf_path))
+                job_data['analysis'] = analysis
+                
+                # Step 2: Optimize if needed
+                optimized_path = pdf_path
+                optimization_result = None
+                
+                if not skip_optimization and self.optimizer.should_optimize(str(pdf_path)):
+                    progress.update(main_task, description="[yellow]Optimizing PDF...", advance=1)
+                    optimization_result = self.optimizer.optimize_for_text_extraction(
+                        str(pdf_path),
+                        remove_images=not keep_images
+                    )
+                    
+                    if optimization_result['status'] == 'success':
+                        optimized_path = Path(optimization_result['output_file'])
+                        job_data['optimization'] = optimization_result
+                        if self.verbose:
+                            console.print(f"[green]PDF optimized: {optimization_result['size_reduction_percent']:.1f}% size reduction[/green]")
+                else:
+                    progress.update(main_task, description="[green]Skipping optimization", advance=1)
+                    job_data['optimization'] = {'skipped': True}
+                
+                # Step 3: Check if chunking is needed
+                total_pages = self._get_pdf_page_count(optimized_path)
+                needs_chunking = (
+                    not disable_chunking and 
+                    not page_ranges and  # Don't chunk if user specified page ranges
+                    total_pages > chunk_threshold
+                )
+                
+                if needs_chunking:
+                    if self.verbose:
+                        console.print(f"[cyan]Document has {total_pages} pages, using chunking strategy (chunk size: {chunk_size})[/cyan]")
+                    progress.update(main_task, description="[blue]Processing in chunks...", advance=1)
+                    
+                    # Process document in chunks, passing progress context
+                    result = self._process_pdf_chunked(
+                        optimized_path, formatting_prompt, job_id, job_data, progress, main_task
+                    )
+                    return result
+                
+                else:
+                    if self.verbose and not page_ranges:
+                        console.print(f"[green]Document has {total_pages} pages, processing as single document[/green]")
+                    progress.update(main_task, description="[blue]Processing single document...", advance=1)
+                
+                # Step 4: Upload PDF file (for single document processing)
                 progress.update(main_task, description="[yellow]Uploading PDF file...", advance=1)
                 
-                with open(pdf_path, "rb") as f:
+                with open(optimized_path, "rb") as f:
                     uploaded_pdf = self.client.files.upload(
                         file={
-                            "file_name": pdf_path.name,
+                            "file_name": optimized_path.name,
                             "content": f,
                         },
                         purpose="ocr"
@@ -168,7 +266,7 @@ class MistralChatOCR:
                 if self.verbose:
                     console.print(f"[green]File uploaded successfully: {uploaded_pdf.id}[/green]")
                 
-                # Step 2: Prepare and submit to API
+                # Step 4: Prepare and submit to API
                 progress.update(main_task, description="[blue]Preparing chat request...", advance=0.5)
                 
                 # Update job with pre-submission status
@@ -204,7 +302,7 @@ class MistralChatOCR:
                 # Make the API call with timeout - this is where hangs typically occur
                 api_start_time = time.time()
                 try:
-                    with TimeoutContext(timeout_seconds=300):  # 5 minute timeout
+                    with TimeoutContext(timeout_seconds=120):  # 2 minute timeout with retry logic
                         chat_response = self.client.chat.complete(
                             model=self.model,
                             messages=messages,
@@ -220,22 +318,100 @@ class MistralChatOCR:
                     if self.verbose:
                         console.print(f"[green]API response received in {api_duration:.1f}s[/green]")
                     
-                except APITimeoutError as timeout_error:
+                except (APITimeoutError, Exception) as api_error:
                     api_duration = time.time() - api_start_time
-                    job_data['current_stage'] = 'api_timeout'
-                    job_data['mistral_api']['api_timeout'] = str(timeout_error)
-                    job_data['mistral_api']['api_timeout_duration'] = api_duration
-                    self._save_job(job_id, job_data)
-                    console.print(f"[red]API call timed out after {api_duration:.1f}s[/red]")
-                    raise timeout_error
                     
-                except Exception as api_error:
-                    api_duration = time.time() - api_start_time
-                    job_data['current_stage'] = 'api_error'
-                    job_data['mistral_api']['api_error'] = str(api_error)
-                    job_data['mistral_api']['api_error_duration'] = api_duration
+                    # Try chunking strategy for large PDFs instead of OCR fallback
+                    if (isinstance(api_error, APITimeoutError) or "504" in str(api_error) or "timeout" in str(api_error).lower()):
+                        
+                        # For large PDFs (no page ranges), try chunking
+                        if not page_ranges:
+                            console.print(f"[yellow]Chat API timed out ({api_duration:.1f}s), trying chunked processing...[/yellow]")
+                            
+                            # Update job with chunking attempt
+                            job_data['current_stage'] = 'trying_chunked_processing'
+                            job_data['mistral_api']['chat_api_error'] = str(api_error)
+                            job_data['mistral_api']['chat_api_duration'] = api_duration
+                            job_data['mistral_api']['chunking_attempted'] = True
+                            self._save_job(job_id, job_data)
+                            
+                            try:
+                                # Process in smaller chunks to preserve formatting
+                                chunked_result = self._process_pdf_chunked(original_pdf_path, formatting_prompt, job_id, job_data)
+                                
+                                if chunked_result['status'] == 'success':
+                                    # Clean up temporary file if created
+                                    if temp_file and pdf_path.exists():
+                                        pdf_path.unlink()
+                                    
+                                    return chunked_result
+                                    
+                            except Exception as chunk_error:
+                                console.print(f"[red]Chunked processing also failed: {chunk_error}[/red]")
+                                job_data['mistral_api']['chunking_error'] = str(chunk_error)
+                        
+                        # If still failing and OCR fallback is enabled, use it as last resort
+                        elif (self.enable_fallback and self.ocr_fallback):
+                            console.print(f"[yellow]Chat API failed, trying OCR fallback (formatting may be reduced)...[/yellow]")
+                            
+                            job_data['current_stage'] = 'trying_ocr_fallback'
+                            job_data['mistral_api']['fallback_attempted'] = True
+                            self._save_job(job_id, job_data)
+                            
+                            try:
+                                fallback_start = time.time()
+                                ocr_result = self.ocr_fallback.process_pdf(str(original_pdf_path), page_ranges)
+                                fallback_duration = time.time() - fallback_start
+                                
+                                if ocr_result['status'] == 'success':
+                                    console.print(f"[green]OCR fallback succeeded in {fallback_duration:.1f}s (formatting reduced)[/green]")
+                                    processing_time = time.time() - start_time
+                                    result = {
+                                        'status': 'success',
+                                        'input_file': str(original_pdf_path),
+                                        'markdown_content': ocr_result['markdown_content'],
+                                        'processing_time': processing_time,
+                                        'model': f"{self.model} (OCR fallback - formatting reduced)",
+                                        'formatting_prompt_length': len(formatting_prompt) if formatting_prompt else 0,
+                                        'page_ranges': page_ranges,
+                                        'job_id': job_id,
+                                        'timestamp': datetime.now().isoformat(),
+                                        'fallback_used': True,
+                                        'formatting_preserved': False  # Important warning
+                                    }
+                                    
+                                    job_data['status'] = 'completed'
+                                    job_data['end_time'] = datetime.now().isoformat()
+                                    job_data['processing_time'] = processing_time
+                                    job_data['model'] = result['model']
+                                    job_data['mistral_api']['fallback_success'] = True
+                                    job_data['mistral_api']['fallback_duration'] = fallback_duration
+                                    self._save_job(job_id, job_data)
+                                    
+                                    # Clean up temporary file
+                                    if temp_file and pdf_path.exists():
+                                        pdf_path.unlink()
+                                    
+                                    self._display_results(result, processing_time, len(ocr_result['markdown_content']))
+                                    return result
+                                    
+                            except Exception as fallback_error:
+                                console.print(f"[red]OCR fallback also failed: {fallback_error}[/red]")
+                                job_data['mistral_api']['fallback_error'] = str(fallback_error)
+                    
+                    # Original error handling if no fallback or fallback failed
+                    if isinstance(api_error, APITimeoutError):
+                        job_data['current_stage'] = 'api_timeout'
+                        job_data['mistral_api']['api_timeout'] = str(api_error)
+                        job_data['mistral_api']['api_timeout_duration'] = api_duration
+                        console.print(f"[red]API call timed out after {api_duration:.1f}s[/red]")
+                    else:
+                        job_data['current_stage'] = 'api_error'
+                        job_data['mistral_api']['api_error'] = str(api_error)
+                        job_data['mistral_api']['api_error_duration'] = api_duration
+                        console.print(f"[red]API error after {api_duration:.1f}s: {api_error}[/red]")
+                    
                     self._save_job(job_id, job_data)
-                    console.print(f"[red]API error after {api_duration:.1f}s: {api_error}[/red]")
                     raise api_error
                 
                 # Update job with chat response details
@@ -251,7 +427,7 @@ class MistralChatOCR:
                 })
                 self._save_job(job_id, job_data)
                 
-                # Step 3: Extract and finalize results
+                # Step 5: Extract and finalize results
                 progress.update(main_task, description="[green]Finalizing results...", advance=1)
                 
                 # Extract markdown content from response
@@ -329,6 +505,216 @@ class MistralChatOCR:
                 
                 return error_result
     
+    def _process_pdf_chunked(self, pdf_path: Path, formatting_prompt: str, job_id: str, job_data: dict, progress=None, main_task=None) -> Dict[str, Any]:
+        """
+        Process large PDF by breaking it into smaller chunks to preserve Chat API formatting.
+        
+        Args:
+            pdf_path: Path to PDF file
+            formatting_prompt: Formatting instructions
+            job_id: Job identifier
+            job_data: Job tracking data
+            
+        Returns:
+            Combined result from all chunks
+        """
+        start_time = time.time()
+        
+        # Determine PDF size and optimal chunk size
+        doc = fitz.open(pdf_path)
+        total_pages = doc.page_count
+        doc.close()
+        
+        # Dynamic chunk size based on total pages (smaller chunks for large docs)
+        if total_pages <= 10:
+            chunk_size = 5
+        elif total_pages <= 30:
+            chunk_size = 10  
+        else:
+            chunk_size = 15
+        
+        console.print(f"[cyan]Processing {total_pages} pages in chunks of {chunk_size}[/cyan]")
+        
+        chunks = []
+        chunk_results = []
+        
+        # Create page range chunks
+        for start_page in range(1, total_pages + 1, chunk_size):
+            end_page = min(start_page + chunk_size - 1, total_pages)
+            chunk_range = f"{start_page}-{end_page}" if start_page != end_page else str(start_page)
+            chunks.append(chunk_range)
+        
+        # Setup working file for incremental saving
+        output_dir = Path("output")
+        output_dir.mkdir(exist_ok=True)
+        working_file = output_dir / f"{pdf_path.stem}_{job_id}_WORKING.md"
+        
+        # Use existing progress bar if available, otherwise create a new one
+        if progress and main_task:
+            # Update existing progress bar for chunk processing
+            chunk_task = main_task
+            use_existing_progress = True
+        else:
+            # Create new progress bar if not passed
+            progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeRemainingColumn(),
+                console=console
+            )
+            chunk_task = progress.add_task(f"[cyan]Processing {len(chunks)} chunks", total=len(chunks))
+            use_existing_progress = False
+        
+        # Process each chunk with Chat API but without verbose output to avoid conflicts
+        original_verbose = self.verbose
+        self.verbose = False  # Disable verbose output for chunks
+        
+        try:
+            for i, chunk_range in enumerate(chunks):
+                if use_existing_progress:
+                    progress.update(chunk_task, description=f"[blue]Processing chunk {i+1}/{len(chunks)}: pages {chunk_range}")
+                else:
+                    progress.update(chunk_task, description=f"[blue]Processing chunk {i+1}/{len(chunks)}: pages {chunk_range}")
+                
+                try:
+                    chunk_result = self.process_pdf_with_chat(
+                        str(pdf_path), 
+                        formatting_prompt, 
+                        chunk_range,
+                        skip_optimization=True,  # Already optimized
+                        keep_images=False,
+                        chunk_size=15,
+                        chunk_threshold=20,
+                        disable_chunking=True,  # Prevent recursion
+                        show_progress=False  # Prevent progress bar conflicts
+                    )
+                    
+                    if chunk_result['status'] == 'success':
+                        chunk_content = chunk_result['markdown_content']
+                        chunk_results.append({
+                            'pages': chunk_range,
+                            'content': chunk_content,
+                            'processing_time': chunk_result['processing_time']
+                        })
+                        console.print(f"[green]Chunk {i+1} completed ({chunk_result['processing_time']:.1f}s)[/green]")
+                    else:
+                        chunk_content = f"<!-- ERROR: Chunk {chunk_range} failed: {chunk_result.get('error', 'Unknown error')} -->"
+                        console.print(f"[red]Chunk {i+1} failed: {chunk_result.get('error', 'Unknown error')}[/red]")
+                        chunk_results.append({
+                            'pages': chunk_range,
+                            'content': chunk_content,
+                            'processing_time': 0
+                        })
+                    
+                    # Save incremental progress to working file
+                    incremental_content = []
+                    for result in chunk_results:
+                        incremental_content.append(f"<!-- Pages {result['pages']} -->\n{result['content']}\n")
+                    
+                    with open(working_file, 'w', encoding='utf-8') as f:
+                        f.write("\n".join(incremental_content))
+                    
+                    # Small delay between chunks to avoid rate limiting
+                    time.sleep(2)
+                    
+                except Exception as chunk_error:
+                    console.print(f"[red]Chunk {i+1} error: {chunk_error}[/red]")
+                    chunk_content = f"<!-- ERROR: Chunk {chunk_range} error: {chunk_error} -->"
+                    chunk_results.append({
+                        'pages': chunk_range,
+                        'content': chunk_content,
+                        'processing_time': 0
+                    })
+                    
+                    # Save incremental progress even on error
+                    incremental_content = []
+                    for result in chunk_results:
+                        incremental_content.append(f"<!-- Pages {result['pages']} -->\n{result['content']}\n")
+                    
+                    with open(working_file, 'w', encoding='utf-8') as f:
+                        f.write("\n".join(incremental_content))
+                
+                # Update progress (only advance if we have our own progress bar)
+                if not use_existing_progress:
+                    progress.advance(chunk_task)
+            
+        finally:
+            # Restore original verbose setting
+            self.verbose = original_verbose
+        
+        # Combine all chunk results
+        combined_content = []
+        total_chunk_time = 0
+        successful_chunks = 0
+        
+        for chunk_result in chunk_results:
+            if not chunk_result['content'].startswith('<!-- ERROR'):
+                successful_chunks += 1
+            combined_content.append(f"<!-- Pages {chunk_result['pages']} -->\n{chunk_result['content']}\n")
+            total_chunk_time += chunk_result['processing_time']
+        
+        final_content = "\n".join(combined_content)
+        processing_time = time.time() - start_time
+        
+        # Create final result
+        result = {
+            'status': 'success' if successful_chunks > 0 else 'error',
+            'input_file': str(pdf_path),
+            'markdown_content': final_content,
+            'processing_time': processing_time,
+            'model': f"{self.model} (chunked: {successful_chunks}/{len(chunks)} chunks)",
+            'formatting_prompt_length': len(formatting_prompt),
+            'page_ranges': f"all ({len(chunks)} chunks)",
+            'job_id': job_id,
+            'timestamp': datetime.now().isoformat(),
+            'chunked': True,
+            'chunks_processed': successful_chunks,
+            'total_chunks': len(chunks),
+            'chunk_processing_time': total_chunk_time
+        }
+        
+        # Update job data
+        job_data['status'] = 'completed' if successful_chunks > 0 else 'failed'
+        job_data['current_stage'] = 'completed_chunked'
+        job_data['end_time'] = datetime.now().isoformat()
+        job_data['processing_time'] = processing_time
+        job_data['markdown_length'] = len(final_content)
+        job_data['model'] = result['model']
+        
+        # Initialize mistral_api section if it doesn't exist
+        if 'mistral_api' not in job_data:
+            job_data['mistral_api'] = {}
+        
+        job_data['mistral_api']['chunking_success'] = True
+        job_data['mistral_api']['chunks_processed'] = successful_chunks
+        job_data['mistral_api']['total_chunks'] = len(chunks)
+        job_data['mistral_api']['chunk_processing_time'] = total_chunk_time
+        self._save_job(job_id, job_data)
+        
+        console.print(f"[green]Chunked processing completed: {successful_chunks}/{len(chunks)} chunks successful[/green]")
+        
+        # Rename working file to final output file if successful
+        if successful_chunks > 0:
+            final_output_file = output_dir / f"{pdf_path.stem}_laser_focused_{job_id}.md"
+            try:
+                working_file.rename(final_output_file)
+                console.print(f"[green]Final output saved to: {final_output_file}[/green]")
+                result['output_file'] = str(final_output_file)
+            except Exception as e:
+                console.print(f"[yellow]Warning: Could not rename working file: {e}[/yellow]")
+                console.print(f"[yellow]Working file remains at: {working_file}[/yellow]")
+                result['output_file'] = str(working_file)
+        else:
+            console.print(f"[yellow]Processing failed, partial results saved to: {working_file}[/yellow]")
+            result['output_file'] = str(working_file)
+        
+        # Display results
+        self._display_results(result, processing_time, len(final_content))
+        
+        return result
+    
     def _extract_pages(self, pdf_path: Path, page_ranges: str) -> Path:
         """
         Extract specific pages from PDF and create a temporary file.
@@ -393,37 +779,41 @@ class MistralChatOCR:
         
         return sorted(set(pages))
     
+    def _get_pdf_page_count(self, pdf_path: Path) -> int:
+        """
+        Get the total page count of a PDF file.
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            Number of pages in the PDF
+        """
+        doc = fitz.open(pdf_path)
+        page_count = doc.page_count
+        doc.close()
+        return page_count
+    
     def _get_default_formatting_prompt(self) -> str:
         """
-        Get the default formatting preservation prompt.
+        Get the default formatting preservation prompt (streamlined for Chat API).
         
         Returns:
-            Default prompt for formatting preservation
+            Concise prompt for formatting preservation
         """
-        return """
-Convert this PDF document to clean, semantic Markdown format with strict formatting preservation requirements:
-
-CRITICAL FORMATTING REQUIREMENTS:
-1. **Bold text**: Convert ALL bold text to **bold** markdown syntax
-2. **Italic text**: Convert ALL italic text to *italic* markdown syntax  
-3. **Headers**: Use proper # ## ### markdown hierarchy for all headings
-4. **Lists**: Preserve bullet points and numbered lists with proper indentation
-5. **Tables**: Convert tables to proper markdown table format
-6. **Emphasis**: Look for ANY emphasized text (bold, italic, underlined) and preserve it
-
-SPECIFIC INSTRUCTIONS:
-- Scan every word for font weight changes and styling
-- Bold headings, titles, and emphasized terms are CRITICAL
-- Preserve the original document structure and hierarchy
-- Do not skip ANY formatted text - formatting preservation is mandatory
-- If text appears emphasized visually, make it bold or italic in markdown
-- Pay special attention to section headers, game terms, and important phrases
-
-Output only the converted markdown content with no additional commentary.
-"""
+        return """Convert this PDF to Markdown. Preserve ALL formatting:
+- **Bold text** → **bold** markdown
+- *Italic text* → *italic* markdown  
+- ***Bold+italic*** → ***bold+italic*** markdown
+- Headers → # ## ### hierarchy
+- Lists and tables preserved
+- Scan every word for font styling
+Output only markdown, no commentary."""
     
     def process_with_custom_prompt(self, pdf_path: str, custom_prompt: str, 
-                                 page_ranges: Optional[str] = None) -> Dict[str, Any]:
+                                 page_ranges: Optional[str] = None, skip_optimization: bool = False, 
+                                 keep_images: bool = False, chunk_size: int = 15, 
+                                 chunk_threshold: int = 20, disable_chunking: bool = False) -> Dict[str, Any]:
         """
         Process PDF with a completely custom prompt.
         
@@ -435,9 +825,9 @@ Output only the converted markdown content with no additional commentary.
         Returns:
             Dict with processing results
         """
-        return self.process_pdf_with_chat(pdf_path, custom_prompt, page_ranges)
+        return self.process_pdf_with_chat(pdf_path, custom_prompt, page_ranges, skip_optimization, keep_images, chunk_size, chunk_threshold, disable_chunking)
     
-    def test_formatting_approaches(self, pdf_path: str, page_ranges: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    def test_formatting_approaches(self, pdf_path: str, page_ranges: Optional[str] = None, skip_optimization: bool = False, keep_images: bool = False, chunk_size: int = 15, chunk_threshold: int = 20, disable_chunking: bool = False) -> Dict[str, Dict[str, Any]]:
         """
         Test multiple formatting approaches on the same document.
         
@@ -465,7 +855,7 @@ Output only the converted markdown content with no additional commentary.
             if self.verbose:
                 console.print(f"[cyan]Testing approach: {approach_name}[/cyan]")
             
-            result = self.process_pdf_with_chat(pdf_path, prompt, page_ranges)
+            result = self.process_pdf_with_chat(pdf_path, prompt, page_ranges, skip_optimization, keep_images, chunk_size, chunk_threshold, disable_chunking)
             results[approach_name] = result
             
             # Small delay between requests
@@ -891,6 +1281,18 @@ def main():
     parser.add_argument("--check-job", help="Check specific job status")
     parser.add_argument("--check-hung", action="store_true", help="Check for hung/stuck jobs")
     
+    # Optimization options
+    parser.add_argument("--no-optimize", action="store_true", help="Skip PDF optimization step")
+    parser.add_argument("--keep-images", action="store_true", help="Keep images during optimization")
+    
+    # Chunking options
+    parser.add_argument("--chunk-size", type=int, default=15, help="Pages per chunk for large documents (default: 15)")
+    parser.add_argument("--chunk-threshold", type=int, default=20, help="Page count threshold to trigger chunking (default: 20)")
+    parser.add_argument("--no-chunk", action="store_true", help="Disable automatic chunking (process entire document)")
+    
+    # API options
+    parser.add_argument("--no-fallback", action="store_true", help="Disable automatic OCR API fallback on Chat API failures")
+    
     args = parser.parse_args()
     
     # Create output directory
@@ -899,7 +1301,7 @@ def main():
     
     try:
         # Initialize Mistral Chat OCR
-        chat_ocr = MistralChatOCR(model=args.model, verbose=True)
+        chat_ocr = MistralChatOCR(model=args.model, verbose=True, enable_fallback=not args.no_fallback)
         
         # Handle job management commands first
         if args.list_jobs:
@@ -927,7 +1329,10 @@ def main():
                 custom_prompt = f.read()
             
             console.print(f"[blue]Using custom prompt from: {args.custom_prompt}[/blue]")
-            result = chat_ocr.process_with_custom_prompt(args.pdf_path, custom_prompt, args.pages)
+            result = chat_ocr.process_with_custom_prompt(args.pdf_path, custom_prompt, args.pages, 
+                                                       skip_optimization=args.no_optimize, keep_images=args.keep_images,
+                                                       chunk_size=args.chunk_size, chunk_threshold=args.chunk_threshold, 
+                                                       disable_chunking=args.no_chunk)
             
             # Handle results with comprehensive error handling
             job_id = result.get('job_id', f'job_{timestamp}')
@@ -980,7 +1385,7 @@ def main():
         elif args.approach == 'all':
             # Test all approaches
             console.print("[blue]Testing all formatting approaches...[/blue]")
-            results = chat_ocr.test_formatting_approaches(args.pdf_path, args.pages)
+            results = chat_ocr.test_formatting_approaches(args.pdf_path, args.pages, skip_optimization=args.no_optimize, keep_images=args.keep_images, chunk_size=args.chunk_size, chunk_threshold=args.chunk_threshold, disable_chunking=args.no_chunk)
             
             # Save results for each approach with comprehensive error handling
             failed_approaches = []
@@ -1045,28 +1450,28 @@ def main():
             console.print(f"[blue]Testing {args.approach} approach...[/blue]")
             
             if args.approach == 'default':
-                result = chat_ocr.process_pdf_with_chat(args.pdf_path, page_ranges=args.pages)
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, page_ranges=args.pages, skip_optimization=args.no_optimize, keep_images=args.keep_images, chunk_size=args.chunk_size, chunk_threshold=args.chunk_threshold, disable_chunking=args.no_chunk)
             elif args.approach == 'aggressive':
                 prompt = chat_ocr._get_aggressive_formatting_prompt()
-                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages, skip_optimization=args.no_optimize, keep_images=args.keep_images, chunk_size=args.chunk_size, chunk_threshold=args.chunk_threshold, disable_chunking=args.no_chunk)
             elif args.approach == 'minimal':
                 prompt = chat_ocr._get_minimal_formatting_prompt()
-                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages, skip_optimization=args.no_optimize, keep_images=args.keep_images, chunk_size=args.chunk_size, chunk_threshold=args.chunk_threshold, disable_chunking=args.no_chunk)
             elif args.approach == 'llamaparse':
                 prompt = chat_ocr._get_llamaparse_formatting_prompt()
-                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages, skip_optimization=args.no_optimize, keep_images=args.keep_images, chunk_size=args.chunk_size, chunk_threshold=args.chunk_threshold, disable_chunking=args.no_chunk)
             elif args.approach == 'italic_focused':
                 prompt = chat_ocr._get_italic_focused_prompt()
-                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages, skip_optimization=args.no_optimize, keep_images=args.keep_images, chunk_size=args.chunk_size, chunk_threshold=args.chunk_threshold, disable_chunking=args.no_chunk)
             elif args.approach == 'style_hunter':
                 prompt = chat_ocr._get_style_hunter_prompt()
-                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages, skip_optimization=args.no_optimize, keep_images=args.keep_images, chunk_size=args.chunk_size, chunk_threshold=args.chunk_threshold, disable_chunking=args.no_chunk)
             elif args.approach == 'ultra_precise':
                 prompt = chat_ocr._get_ultra_precise_prompt()
-                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages, skip_optimization=args.no_optimize, keep_images=args.keep_images, chunk_size=args.chunk_size, chunk_threshold=args.chunk_threshold, disable_chunking=args.no_chunk)
             elif args.approach == 'laser_focused':
                 prompt = chat_ocr._get_laser_focused_prompt()
-                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages)
+                result = chat_ocr.process_pdf_with_chat(args.pdf_path, prompt, args.pages, skip_optimization=args.no_optimize, keep_images=args.keep_images, chunk_size=args.chunk_size, chunk_threshold=args.chunk_threshold, disable_chunking=args.no_chunk)
             
             # Handle results with comprehensive error handling
             job_id = result.get('job_id', f'job_{timestamp}')
