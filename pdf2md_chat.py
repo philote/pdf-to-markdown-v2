@@ -48,6 +48,16 @@ class DummyProgress:
         pass
 
 
+class DummyContext:
+    """Dummy context manager that does nothing."""
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        pass
+
+
 class APITimeoutError(Exception):
     """Raised when API call exceeds timeout"""
     pass
@@ -231,7 +241,7 @@ class MistralChatOCR:
                     
                     # Process document in chunks, passing progress context
                     result = self._process_pdf_chunked(
-                        optimized_path, formatting_prompt, job_id, job_data, progress, main_task
+                        optimized_path, formatting_prompt, job_id, job_data, progress, main_task, chunk_size
                     )
                     return result
                 
@@ -337,7 +347,7 @@ class MistralChatOCR:
                             
                             try:
                                 # Process in smaller chunks to preserve formatting
-                                chunked_result = self._process_pdf_chunked(original_pdf_path, formatting_prompt, job_id, job_data)
+                                chunked_result = self._process_pdf_chunked(original_pdf_path, formatting_prompt, job_id, job_data, chunk_size=chunk_size)
                                 
                                 if chunked_result['status'] == 'success':
                                     # Clean up temporary file if created
@@ -430,8 +440,9 @@ class MistralChatOCR:
                 # Step 5: Extract and finalize results
                 progress.update(main_task, description="[green]Finalizing results...", advance=1)
                 
-                # Extract markdown content from response
-                markdown_content = chat_response.choices[0].message.content
+                # Extract and clean markdown content from response (clean preambles but not page markers)
+                raw_markdown_content = chat_response.choices[0].message.content
+                markdown_content = self._clean_mistral_response(raw_markdown_content, remove_page_markers=False)
                 
                 processing_time = time.time() - start_time
                 
@@ -505,7 +516,7 @@ class MistralChatOCR:
                 
                 return error_result
     
-    def _process_pdf_chunked(self, pdf_path: Path, formatting_prompt: str, job_id: str, job_data: dict, progress=None, main_task=None) -> Dict[str, Any]:
+    def _process_pdf_chunked(self, pdf_path: Path, formatting_prompt: str, job_id: str, job_data: dict, progress=None, main_task=None, chunk_size: int = 15) -> Dict[str, Any]:
         """
         Process large PDF by breaking it into smaller chunks to preserve Chat API formatting.
         
@@ -525,13 +536,13 @@ class MistralChatOCR:
         total_pages = doc.page_count
         doc.close()
         
-        # Dynamic chunk size based on total pages (smaller chunks for large docs)
-        if total_pages <= 10:
-            chunk_size = 5
-        elif total_pages <= 30:
-            chunk_size = 10  
-        else:
-            chunk_size = 15
+        # Use provided chunk_size parameter, but apply some dynamic logic if it's the default
+        if chunk_size == 15:  # Only apply dynamic sizing if using default
+            if total_pages <= 10:
+                chunk_size = 5
+            elif total_pages <= 30:
+                chunk_size = 10  
+            # else keep the default 15
         
         console.print(f"[cyan]Processing {total_pages} pages in chunks of {chunk_size}[/cyan]")
         
@@ -549,36 +560,36 @@ class MistralChatOCR:
         output_dir.mkdir(exist_ok=True)
         working_file = output_dir / f"{pdf_path.stem}_{job_id}_WORKING.md"
         
-        # Use existing progress bar if available, otherwise create a new one
+        # Always use the existing progress bar if available, otherwise create a simple one
         if progress and main_task:
-            # Update existing progress bar for chunk processing
+            # Use the existing progress bar and update the main task for chunking
+            chunk_progress = progress
             chunk_task = main_task
+            # Update the main task to show chunking progress
+            progress.update(main_task, description=f"[cyan]Processing {len(chunks)} chunks", total=len(chunks), completed=0)
             use_existing_progress = True
         else:
-            # Create new progress bar if not passed
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeRemainingColumn(),
-                console=console
-            )
-            chunk_task = progress.add_task(f"[cyan]Processing {len(chunks)} chunks", total=len(chunks))
+            # No existing progress, we'll just use console output for chunks
+            chunk_progress = None
+            chunk_task = None
             use_existing_progress = False
         
         # Process each chunk with Chat API but without verbose output to avoid conflicts
         original_verbose = self.verbose
         self.verbose = False  # Disable verbose output for chunks
         
+        # Process chunks (no context manager needed since we're using existing progress)
         try:
             for i, chunk_range in enumerate(chunks):
-                if use_existing_progress:
-                    progress.update(chunk_task, description=f"[blue]Processing chunk {i+1}/{len(chunks)}: pages {chunk_range}")
+                if chunk_progress and chunk_task:
+                    chunk_progress.update(chunk_task, description=f"[blue]Processing chunk {i+1}/{len(chunks)}: pages {chunk_range}")
                 else:
-                    progress.update(chunk_task, description=f"[blue]Processing chunk {i+1}/{len(chunks)}: pages {chunk_range}")
+                    console.print(f"[cyan]Processing chunk {i+1} of {len(chunks)}: pages {chunk_range}[/cyan]")
                 
                 try:
+                    # Create chunk job with chunk info in the ID
+                    chunk_job_id = f"{job_id}_chunk_{i+1:02d}_of_{len(chunks):02d}"
+                    
                     chunk_result = self.process_pdf_with_chat(
                         str(pdf_path), 
                         formatting_prompt, 
@@ -591,21 +602,63 @@ class MistralChatOCR:
                         show_progress=False  # Prevent progress bar conflicts
                     )
                     
+                    # Update chunk result with chunk info
+                    if 'job_id' in chunk_result:
+                        # Save the original chunk job data first
+                        original_chunk_job_id = chunk_result['job_id']
+                        
+                        # Update the chunk result with new job ID and metadata
+                        chunk_result['job_id'] = chunk_job_id
+                        chunk_result['chunk_info'] = {
+                            'chunk_number': i + 1,
+                            'total_chunks': len(chunks),
+                            'parent_job_id': job_id,
+                            'page_range': chunk_range,
+                            'original_chunk_job_id': original_chunk_job_id
+                        }
+                        
+                        # Update the saved job file with new ID and chunk metadata
+                        if chunk_result['status'] == 'success':
+                            original_job_file = self.jobs_dir / f"{original_chunk_job_id}.json"
+                            chunk_job_file = self.jobs_dir / f"{chunk_job_id}.json"
+                            
+                            # Read original job data and update it
+                            if original_job_file.exists():
+                                with open(original_job_file, 'r') as f:
+                                    chunk_job_data = json.load(f)
+                                
+                                # Add chunk metadata
+                                chunk_job_data['id'] = chunk_job_id
+                                chunk_job_data['chunk_info'] = chunk_result['chunk_info']
+                                chunk_job_data['is_chunk'] = True
+                                
+                                # Save with new filename
+                                with open(chunk_job_file, 'w') as f:
+                                    json.dump(chunk_job_data, f, indent=2, default=str)
+                                
+                                # Remove original file
+                                original_job_file.unlink()
+                    
                     if chunk_result['status'] == 'success':
+                        # Keep raw content during chunking - we'll clean it at the end
                         chunk_content = chunk_result['markdown_content']
                         chunk_results.append({
                             'pages': chunk_range,
                             'content': chunk_content,
-                            'processing_time': chunk_result['processing_time']
+                            'processing_time': chunk_result['processing_time'],
+                            'chunk_number': i + 1,
+                            'job_id': chunk_job_id
                         })
-                        console.print(f"[green]Chunk {i+1} completed ({chunk_result['processing_time']:.1f}s)[/green]")
+                        console.print(f"[green]Chunk {i+1} of {len(chunks)} completed ({chunk_result['processing_time']:.1f}s)[/green]")
                     else:
                         chunk_content = f"<!-- ERROR: Chunk {chunk_range} failed: {chunk_result.get('error', 'Unknown error')} -->"
-                        console.print(f"[red]Chunk {i+1} failed: {chunk_result.get('error', 'Unknown error')}[/red]")
+                        console.print(f"[red]Chunk {i+1} of {len(chunks)} failed: {chunk_result.get('error', 'Unknown error')}[/red]")
                         chunk_results.append({
                             'pages': chunk_range,
                             'content': chunk_content,
-                            'processing_time': 0
+                            'processing_time': 0,
+                            'chunk_number': i + 1,
+                            'job_id': chunk_job_id
                         })
                     
                     # Save incremental progress to working file
@@ -616,16 +669,23 @@ class MistralChatOCR:
                     with open(working_file, 'w', encoding='utf-8') as f:
                         f.write("\n".join(incremental_content))
                     
+                    # Update chunk progress
+                    if chunk_progress and chunk_task:
+                        chunk_progress.advance(chunk_task)
+                    
                     # Small delay between chunks to avoid rate limiting
                     time.sleep(2)
                     
                 except Exception as chunk_error:
-                    console.print(f"[red]Chunk {i+1} error: {chunk_error}[/red]")
+                    console.print(f"[red]Chunk {i+1} of {len(chunks)} error: {chunk_error}[/red]")
                     chunk_content = f"<!-- ERROR: Chunk {chunk_range} error: {chunk_error} -->"
+                    chunk_job_id = f"{job_id}_chunk_{i+1:02d}_of_{len(chunks):02d}"
                     chunk_results.append({
                         'pages': chunk_range,
                         'content': chunk_content,
-                        'processing_time': 0
+                        'processing_time': 0,
+                        'chunk_number': i + 1,
+                        'job_id': chunk_job_id
                     })
                     
                     # Save incremental progress even on error
@@ -635,11 +695,11 @@ class MistralChatOCR:
                     
                     with open(working_file, 'w', encoding='utf-8') as f:
                         f.write("\n".join(incremental_content))
-                
-                # Update progress (only advance if we have our own progress bar)
-                if not use_existing_progress:
-                    progress.advance(chunk_task)
-            
+                    
+                    # Update chunk progress
+                    if chunk_progress and chunk_task:
+                        chunk_progress.advance(chunk_task)
+        
         finally:
             # Restore original verbose setting
             self.verbose = original_verbose
@@ -655,7 +715,12 @@ class MistralChatOCR:
             combined_content.append(f"<!-- Pages {chunk_result['pages']} -->\n{chunk_result['content']}\n")
             total_chunk_time += chunk_result['processing_time']
         
-        final_content = "\n".join(combined_content)
+        # Combine all content first
+        raw_final_content = "\n".join(combined_content)
+        
+        # Clean the final combined content to remove all preambles and page markers
+        final_content = self._clean_mistral_response(raw_final_content, remove_page_markers=True)
+        
         processing_time = time.time() - start_time
         
         # Create final result
@@ -691,6 +756,18 @@ class MistralChatOCR:
         job_data['mistral_api']['chunks_processed'] = successful_chunks
         job_data['mistral_api']['total_chunks'] = len(chunks)
         job_data['mistral_api']['chunk_processing_time'] = total_chunk_time
+        job_data['mistral_api']['chunk_job_ids'] = [result['job_id'] for result in chunk_results]
+        job_data['chunked'] = True
+        job_data['chunk_details'] = [
+            {
+                'chunk_number': result['chunk_number'],
+                'pages': result['pages'],
+                'job_id': result['job_id'],
+                'processing_time': result['processing_time'],
+                'success': not result['content'].startswith('<!-- ERROR')
+            }
+            for result in chunk_results
+        ]
         self._save_job(job_id, job_data)
         
         console.print(f"[green]Chunked processing completed: {successful_chunks}/{len(chunks)} chunks successful[/green]")
@@ -778,6 +855,240 @@ class MistralChatOCR:
                 pages.append(int(part))
         
         return sorted(set(pages))
+    
+    def _clean_mistral_response(self, content: str, remove_page_markers: bool = True) -> str:
+        """
+        Clean up common preambles and postambles from Mistral API responses.
+        Uses a two-pass approach:
+        1. Remove entire --- blocks containing formatting confirmations
+        2. Remove any remaining individual preambles/postambles
+        
+        Args:
+            content: Raw markdown content from Mistral
+            remove_page_markers: Whether to remove <!-- Pages X-Y --> markers
+            
+        Returns:
+            Cleaned markdown content
+        """
+        if not content:
+            return content
+        
+        # FIRST PASS: Remove --- blocks containing formatting confirmations
+        content = self._remove_formatting_confirmation_blocks(content)
+        
+        # SECOND PASS: Remove remaining individual patterns
+        content = self._remove_individual_patterns(content, remove_page_markers)
+        
+        return content.strip()
+    
+    def _remove_formatting_confirmation_blocks(self, content: str) -> str:
+        """
+        Remove entire --- blocks that contain formatting confirmation messages.
+        """
+        lines = content.split('\n')
+        cleaned_lines = []
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Look for start of --- block
+            if line == '---':
+                # Collect the entire block until the next ---
+                block_lines = [lines[i]]  # Include the opening ---
+                i += 1
+                
+                while i < len(lines):
+                    block_lines.append(lines[i])
+                    if lines[i].strip() == '---':
+                        # Found closing ---, check if this block contains formatting confirmations
+                        block_content = '\n'.join(block_lines).lower()
+                        
+                        # Very specific Mistral confirmation patterns (conservative approach)
+                        mistral_specific_indicators = [
+                            'all formatting has been preserved as per your requirements',
+                            'all formatting has been preserved as specified',
+                            'all formatting has been preserved as requested',
+                            'here is the converted document with all formatting preserved',
+                            'here is the document converted to markdown with all formatting preserved',
+                            'bold** text converted to',
+                            'italic* text converted to',
+                            '**bold** markdown',
+                            '*italic* markdown'
+                        ]
+                        
+                        # Check if this is a Mistral confirmation block
+                        if self._is_mistral_confirmation_block(block_content, block_lines):
+                            # Log what we're removing if verbose
+                            if self.verbose:
+                                preview = block_content[:100].replace('\n', ' ')
+                                console.print(f"[yellow]Removing Mistral confirmation block: {preview}...[/yellow]")
+                            # Skip this entire block
+                            break
+                        else:
+                            # Keep this block - it's actual content
+                            cleaned_lines.extend(block_lines)
+                            break
+                    i += 1
+                else:
+                    # Reached end without finding closing ---, keep the block
+                    cleaned_lines.extend(block_lines)
+            else:
+                # Regular line, keep it
+                cleaned_lines.append(lines[i])
+            
+            i += 1
+        
+        return '\n'.join(cleaned_lines)
+    
+    def _is_mistral_confirmation_block(self, block_content: str, block_lines: list) -> bool:
+        """
+        Conservative check to determine if a --- block is a Mistral confirmation.
+        Only returns True if we're very confident it's safe to remove.
+        """
+        # Must contain explicit Mistral confirmation phrases
+        mistral_indicators = [
+            'all formatting has been preserved as per your requirements',
+            'all formatting has been preserved as specified',
+            'all formatting has been preserved as requested',
+            'here is the converted document with all formatting preserved',
+            'here is the document converted to markdown with all formatting preserved',
+            'bold** text converted to',
+            'italic* text converted to',
+            '**bold** text converted to',
+            '*italic* text converted to',
+            '***bold-italic*** text converted to',
+            'bold** markdown',
+            'italic* markdown',
+            'bold-italic*** text converted',
+            'equipment descriptions preserved as',
+            '```markdown'
+        ]
+        
+        has_mistral_confirmation = any(indicator in block_content for indicator in mistral_indicators)
+        
+        if not has_mistral_confirmation:
+            return False
+        
+        # Additional safety checks
+        # 1. Block should be relatively short (Mistral confirmations are brief)
+        if len(block_lines) > 15:  # More than 15 lines is probably real content
+            return False
+        
+        # 2. Should NOT contain game/document content indicators
+        game_content_indicators = [
+            'move', 'roll', 'dice', 'stat', 'character', 'player', 'gm', 'master',
+            'damage', 'health', 'armor', 'weapon', 'spell', 'ability', 'skill',
+            'chapter', 'section', 'rule', 'mechanic', 'fellowship', 'adventure',
+            'game', 'table', 'example', 'story', 'narrative'
+        ]
+        
+        has_game_content = any(indicator in block_content for indicator in game_content_indicators)
+        
+        if has_game_content:
+            return False
+        
+        # 3. Check if it's mostly just confirmation text
+        # Remove known Mistral phrases and see what's left
+        content_without_mistral = block_content
+        for indicator in mistral_indicators:
+            content_without_mistral = content_without_mistral.replace(indicator, '')
+        
+        # Remove formatting examples and conversion explanations
+        formatting_examples = [
+            '**bold**', '*italic*', '***bold-italic***',
+            '`**bold**`', '`*italic*`', '`***bold-italic***`',
+            'text converted to', 'preserved as', 'markdown',
+            '- **Bold**', '- *Italic*', '- ***Bold-italic***',
+            'equipment descriptions', '```markdown', '```'
+        ]
+        
+        for example in formatting_examples:
+            content_without_mistral = content_without_mistral.replace(example, '')
+        
+        # Count substantive remaining content
+        remaining_lines = [line.strip() for line in content_without_mistral.split('\n') 
+                          if line.strip() and not line.strip().startswith('-')]
+        substantive_content = '\n'.join(remaining_lines).strip()
+        
+        # If very little substantive content remains, it's probably safe to remove
+        return len(substantive_content) < 50  # Less than 50 chars of real content
+    
+    def _remove_individual_patterns(self, content: str, remove_page_markers: bool) -> str:
+        """
+        Remove individual preamble/postamble patterns that might not be in --- blocks.
+        """
+        # Common preambles and postambles to remove
+        patterns_to_remove = [
+            # Preambles
+            "Here is the converted document with all formatting preserved as per your requirements:",
+            "Here is the converted markdown text with all formatting preserved as per your requirements:",
+            "Here is the converted markdown with all formatting preserved as specified:",
+            "Here is the converted markdown text with all formatting preserved as specified:",
+            "Here is the converted document with formatting preserved:",
+            "Here is the document converted to Markdown with all formatting preserved:",
+            "Here is the document converted to markdown with all formatting preserved as specified:",
+            "Here is the document converted to markdown with all formatting preserved as per your requirements:",
+            "Here is the document converted to markdown with all formatting preserved as per the requirements:",
+            "Here is the PDF converted to Markdown format:",
+            "Converting the PDF to markdown format with formatting preservation:",
+            "Here is the markdown conversion with formatting preserved:",
+            "I'll convert this PDF to Markdown while preserving all formatting:",
+            "Here's the document converted to Markdown with formatting preserved:",
+            "Converting this document to Markdown with all formatting preserved:",
+            "Here is the conversion with all formatting requirements met:",
+            
+            # Postambles and confirmation messages
+            "All formatting has been preserved as per your requirements.",
+            "All formatting has been preserved as specified.",
+            "All formatting has been preserved as requested.",
+            "All formatting has been preserved as per the requirements.",
+            "All formatting has been preserved as specified, including:",
+            "All formatting has been preserved as requested, including:",
+            "All formatting has been preserved as specified, including **bold**, *italic*, and ***bold-italic*** text.",
+            "The formatting has been preserved as requested.",
+            "The formatting has been preserved as specified.",
+            "Formatting preserved as requested.",
+            "Formatting preserved as specified.",
+            
+            # Formatting example patterns
+            "- **Bold** text converted to `**bold**`",
+            "- *Italic* text converted to `*italic*`", 
+            "- ***Bold-italic*** text converted to `***bold-italic***`",
+            "- *Italic* equipment descriptions preserved as `*italic*`",
+            "```markdown"
+        ]
+        
+        lines = content.split('\n')
+        cleaned_lines = []
+        skip_next_empty = False
+        
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            
+            # Skip page comment markers (<!-- Pages X-Y -->) if requested
+            if remove_page_markers and line_stripped.startswith('<!-- Pages ') and line_stripped.endswith(' -->'):
+                skip_next_empty = True
+                continue
+            
+            # Skip common preambles and postambles (case insensitive)
+            if any(pattern.lower() in line_stripped.lower() for pattern in patterns_to_remove):
+                skip_next_empty = True
+                continue
+            
+            # Skip empty line immediately following a removed preamble or page marker
+            if skip_next_empty and not line_stripped:
+                skip_next_empty = False
+                continue
+            
+            # Skip standalone incomplete markdown code blocks
+            if line_stripped == '```markdown' or line_stripped == '```':
+                continue
+            
+            skip_next_empty = False
+            cleaned_lines.append(line)
+        
+        return '\n'.join(cleaned_lines)
     
     def _get_pdf_page_count(self, pdf_path: Path) -> int:
         """

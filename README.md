@@ -7,9 +7,11 @@ A comprehensive CLI tool that converts PDF TTRPG documents to clean, formatted M
 - **Aggressive Format Preservation**: Bold, italic, headers, lists, and tables
 - **Intelligent PDF Optimization**: Automatic image removal and compression for faster processing
 - **Page Range Processing**: Process specific page ranges to save API credits
-- **Progress Tracking**: Real-time progress display with rich CLI interface
-- **Job Management**: Track processing history and check job status
-- **Comprehensive Metadata**: Detailed processing results and statistics
+- **Smart Chunking**: Automatic processing of large documents in smaller chunks for better reliability
+- **Progress Tracking**: Real-time progress display with rich CLI interface showing actual chunk completion
+- **Job Management**: Track processing history and check job status with detailed chunk metadata
+- **Automatic Content Cleanup**: Removes Mistral API artifacts for clean final output
+- **Comprehensive Metadata**: Detailed processing results and statistics with chunk tracking
 - **Error Recovery**: Clear error messages with suggested fixes
 
 ## Quick Start
@@ -105,6 +107,9 @@ python pdf2md_chat.py --check-job <job_id>
 - `--custom-prompt`: Use custom formatting prompt from file
 - `--output-dir`: Output directory (default: "output")
 - `--model`: Mistral model to use (default: "mistral-small-latest")
+- `--chunk-size`: Pages per chunk for large documents (default: 15)
+- `--chunk-threshold`: Page count threshold to trigger chunking (default: 20)
+- `--no-chunk`: Disable automatic chunking for large documents
 
 ### Examples
 
@@ -154,6 +159,12 @@ python pdf2md_chat.py input/simple_doc.pdf --approach minimal --pages 1-3
 
 # Compare different approaches on same content
 python pdf2md_chat.py input/test_doc.pdf --approach all --pages 1-2
+
+# Large document processing with chunking with user input for chunk settings
+python pdf2md_chat.py input/large_book.pdf --chunk-size 10 --chunk-threshold 15
+
+# Disable chunking for testing
+python pdf2md_chat.py input/medium_doc.pdf --no-chunk
 ```
 
 ## Advanced Chat API Tool (`pdf2md_chat.py`)
@@ -165,8 +176,10 @@ The Chat API tool uses Mistral's chat interface with document processing for **s
 - **Superior Format Detection**: Uses advanced prompting techniques to detect subtle formatting
 - **Multiple Approaches**: 8 different formatting strategies optimized for different content types
 - **Chat API Integration**: Leverages Mistral's document processing capabilities
+- **Smart Chunking**: Automatic processing of large documents for improved reliability
 - **Page Extraction**: Built-in PDF page extraction for targeted processing
-- **Comprehensive Job Tracking**: Full job history and error handling
+- **Automatic Content Cleanup**: Removes Mistral API artifacts for clean final output
+- **Comprehensive Job Tracking**: Full job history and error handling with chunk metadata
 
 ### Formatting Approaches
 
@@ -183,20 +196,77 @@ The tool includes 8 specialized formatting approaches:
 | `ultra_precise` | Known formatting issues | Targets specific formatting patterns |
 | `laser_focused` | **Recommended** | Optimized for TTRPG documents |
 
+### Smart Chunking for Large Documents
+
+The Chat API tool automatically handles large documents through intelligent chunking:
+
+#### Automatic Chunking
+- **Threshold**: Documents over 20 pages are automatically chunked (configurable)
+- **Chunk Size**: Default 15 pages per chunk (configurable)
+- **Dynamic Sizing**: Smaller chunks for very large documents to ensure reliability
+- **Progress Tracking**: Real-time progress showing "Chunk X of Y completed"
+
+#### Chunking Benefits
+- **Improved Reliability**: Smaller chunks are less likely to timeout or fail
+- **Better Progress Tracking**: See exactly which chunks are processing
+- **Cost Optimization**: Failed chunks can be retried individually
+- **Parallel Processing**: Chunks process sequentially with clear progress indication
+
+#### Chunking Configuration
+```bash
+# Adjust chunk size for very large documents
+python pdf2md_chat.py large_book.pdf --chunk-size 10
+
+# Change chunking threshold
+python pdf2md_chat.py medium_book.pdf --chunk-threshold 15
+
+# Disable chunking entirely
+python pdf2md_chat.py any_book.pdf --no-chunk
+```
+
+#### Job Tracking for Chunked Processing
+- **Chunk Job IDs**: Each chunk gets a unique ID like `job_20250718_123456_book_chunk_01_of_15`
+- **Parent Job Metadata**: Contains references to all chunk jobs
+- **Chunk Details**: Individual chunk processing times, success status, and page ranges
+- **Progress Visibility**: See which chunks succeeded/failed and their processing times
+
+### Automatic Content Cleanup
+
+The tool automatically removes Mistral API artifacts from the final output:
+
+#### What Gets Cleaned
+- **API Preambles**: "Here is the converted document with all formatting preserved..."
+- **Confirmation Messages**: "All formatting has been preserved as specified..."
+- **Formatting Examples**: Lists showing conversion patterns like "**Bold** text converted to..."
+- **Page Markers**: `<!-- Pages X-Y -->` comments (only from final output)
+- **Incomplete Code Blocks**: Dangling `\`\`\`markdown` tags
+
+#### Cleanup Strategy
+- **Two-Pass Approach**: First removes structured confirmation blocks, then individual patterns
+- **Conservative Safety**: Multiple checks to avoid removing legitimate document content
+- **Block-Level Detection**: Identifies and removes entire Mistral confirmation blocks between `---` markers
+- **Content Protection**: Preserves blocks containing game content, long content, or substantial text
+
+#### When Cleanup Happens
+- **During Processing**: Page markers and preambles are preserved for debugging
+- **Final Output**: Complete cleanup applied only to the final combined markdown file
+- **Verbose Logging**: Shows exactly what content is being removed (when `--verbose` is used)
+
 ### When to Use Each Tool
 
 **Use `pdf2md_chat.py` when:**
 - Working with TTRPG documents (character sheets, rulebooks, bestiaries)
 - Formatting preservation is critical (bold, italic, bold+italic text)
+- Processing large documents that benefit from chunking
 - You need to test multiple formatting approaches
 - Processing specific page ranges for experimentation
 - Documents have complex formatting that needs preservation
 
 **Use `pdf2md.py` when:**
-- Processing large documents that benefit from optimization
+- Processing medium documents that benefit from optimization
 - Need full pipeline with PDF compression and image removal
 - Working with standard documents where basic formatting is sufficient
-- Want automatic optimization decisions
+- Want automatic optimization decisions without chunking
 
 ### Chat API Features
 
@@ -232,13 +302,37 @@ The tool provides real-time progress with:
 
 **Filename Pattern**: `{pdf_name}_{approach}_{job_id}.md`
 **Metadata**: `{pdf_name}_{approach}_{job_id}_metadata.json`
+**Chunked Jobs**: `{parent_job_id}_chunk_{XX}_of_{YY}.json`
 
 **Comprehensive Metadata** includes:
 - Processing approach and parameters
-- Job tracking information
+- Job tracking information with chunk details
 - Formatting prompt details
 - Processing performance metrics
+- Chunk processing breakdown (for chunked documents)
 - Complete error information (if applicable)
+
+**Chunked Document Metadata** additionally includes:
+```json
+{
+  "chunked": true,
+  "chunk_details": [
+    {
+      "chunk_number": 1,
+      "pages": "1-15",
+      "job_id": "job_20250718_123456_book_chunk_01_of_05",
+      "processing_time": 45.2,
+      "success": true
+    }
+  ],
+  "mistral_api": {
+    "chunk_job_ids": ["job_..._chunk_01_of_05", "job_..._chunk_02_of_05"],
+    "chunks_processed": 5,
+    "total_chunks": 5,
+    "chunk_processing_time": 189.4
+  }
+}
+```
 
 ## Setup Guide
 
